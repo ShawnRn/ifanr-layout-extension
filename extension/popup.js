@@ -80,6 +80,28 @@
     if (statusMsg) statusMsg.textContent = message;
   }
 
+  function showBadgeSuccess() {
+    try {
+      if (chrome.action?.setBadgeText) {
+        chrome.action.setBadgeText({ text: '✓' });
+        if (chrome.action.setBadgeBackgroundColor) {
+          chrome.action.setBadgeBackgroundColor({ color: '#07C160' });
+        }
+        if (chrome.action.setBadgeTextColor) {
+          chrome.action.setBadgeTextColor({ color: '#FFFFFF' });
+        }
+      }
+    } catch {}
+  }
+
+  function clearBadge() {
+    try {
+      if (chrome.action?.setBadgeText) {
+        chrome.action.setBadgeText({ text: '' });
+      }
+    } catch {}
+  }
+
   function showResult(title, copy, tone = 'neutral') {
     if (!resultCard) return;
     resultCard.hidden = false;
@@ -126,6 +148,7 @@
       cachedPackage = data[CACHE_KEY];
       renderPackage(cachedPackage);
       setStatus('已就绪', '历史内容已就绪，可直接注入或复制');
+      showBadgeSuccess();
     }
   }
 
@@ -228,6 +251,7 @@
       }
     });
     renderPackage(pkg);
+    showBadgeSuccess();
     return pkg;
   }
 
@@ -570,6 +594,7 @@
     await chrome.storage.local.remove([CACHE_KEY, ARTICLE_PKG_KEY]);
     renderPackage(null);
     hideResult();
+    clearBadge();
     setStatus('已重置', '点击上方按钮开始转换新文档');
     showToast('已清除历史缓存');
   }

@@ -27,10 +27,11 @@
     html, body {
       width: 380px;
       max-width: 100%;
-      height: 560px;
+      height: auto;
       margin: 0;
       padding: 0;
-      overflow: hidden;
+      overflow-x: hidden;
+      overflow-y: auto;
     }
     body {
       display: flex;
@@ -285,8 +286,7 @@
     /* Scrollable Body Area */
     .scroll-body {
       flex: 1;
-      overflow-y: auto;
-      padding: 10px 14px 16px;
+      padding: 10px 14px 12px;
     }
     .card {
       margin-bottom: 9px;
