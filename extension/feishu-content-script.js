@@ -120,14 +120,34 @@ function snapshotFeishuBlock(block, captureSequence) {
 }
 
 function scanVisibleFeishuBlocks(blocksById, sequence) {
+  const seenImageTokens = new Set();
+  for (const b of blocksById.values()) {
+    if (b.image?.token) seenImageTokens.add(b.image.token);
+    if (b.image?.src) seenImageTokens.add(b.image.src.split('?')[0]);
+  }
+
   for (const element of document.querySelectorAll('[data-block-id]')) {
     if (element.closest('.wiki-catalog, .docx-catalog, .doc-info-sidebar, [data-block-type="catalog"], .bear-web-catalog')) continue;
+    if (element.parentElement?.closest('[data-block-id][data-block-type="image"]')) continue;
+
     const rawId = element.getAttribute('data-block-id') || element.getAttribute('data-record-id') || '';
     if (!rawId) continue;
     const key = rawId || `observed-${sequence.next}`;
     const previous = blocksById.get(key);
     const snapshot = snapshotFeishuBlock(element, previous?.captureSequence || sequence.next);
     if (!snapshot) continue;
+
+    // 图片 Token 去重
+    if (snapshot.type === 'image' || snapshot.image) {
+      const token = snapshot.image?.token;
+      const srcKey = snapshot.image?.src ? snapshot.image.src.split('?')[0] : '';
+      if (!previous && ((token && seenImageTokens.has(token)) || (srcKey && seenImageTokens.has(srcKey)))) {
+        continue;
+      }
+      if (token) seenImageTokens.add(token);
+      if (srcKey) seenImageTokens.add(srcKey);
+    }
+
     if (!previous) sequence.next += 1;
     if (previous && snapshot.top > 0) {
       previous.top = snapshot.top;

@@ -384,101 +384,143 @@ ${WECHAT_FOOTER_IMAGES_HTML}
   }
 
   /**
-   * 将 Markdown 转换为标准 Etherpad (Pad) HTML
-   */
+  * 将 Markdown 转换为标准 Etherpad (Pad) HTML (与 Lark2Pad 官方导出 100% 对齐)
+  */
   function markdownToEtherpadHTML(markdown = '', options = {}) {
     const {
       addHeaderBanner = true,
       addFooterBanner = true
     } = options;
 
-    const lines = String(markdown)
+    const rawLines = String(markdown)
       .replaceAll('\r\n', '\n')
       .replaceAll('\r', '\n')
       .split('\n');
 
-    let result = '';
+    let body = '';
+    let lastImageSrc = '';
 
     if (addHeaderBanner) {
-      result += `<p><img src="${ETHERPAD_HEADER_BANNER_PNG}" /></p>\n`;
+      body += `<img src="${ETHERPAD_HEADER_BANNER_PNG}"><br>\n`;
+      lastImageSrc = ETHERPAD_HEADER_BANNER_PNG;
     }
 
-    let inList = false;
-    for (let index = 0; index < lines.length; index++) {
-      const line = lines[index];
+    let i = 0;
+    while (i < rawLines.length) {
+      const line = rawLines[i];
       const trimmed = line.trim();
 
       if (!trimmed) {
-        if (inList) {
-          result += '</ul>\n';
-          inList = false;
-        }
+        body += '<br>\n';
+        i++;
         continue;
       }
 
-      // 标题
-      const header = parseHeaderWithLevel(trimmed);
-      if (header) {
-        if (inList) {
-          result += '</ul>\n';
-          inList = false;
-        }
-        const tag = header.level <= 1 ? 'h1' : header.level === 2 ? 'h2' : 'h3';
-        result += `<${tag}>${parseInline(header.content)}</${tag}>\n`;
-        continue;
-      }
-
-      // 列表
-      if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-        if (!inList) {
-          result += '<ul>\n';
-          inList = true;
-        }
-        const content = parseInline(trimmed.slice(2));
-        result += `<li>${content}</li>\n`;
-        continue;
-      } else if (inList) {
-        result += '</ul>\n';
-        inList = false;
-      }
-
-      // 图片
+      // 检查是否为独立图片行
       const mdMatch = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
-      if (mdMatch) {
-        const alt = escapeHtml(mdMatch[1]);
-        const url = mdMatch[2];
-        result += `<p><img src="${escapeHtml(url)}" name="${alt}" /></p>\n`;
-        continue;
-      }
+      const imgTagMatch = trimmed.match(/^<img\b[^>]*?\bsrc=["']([^"']+)["'][^>]*>/i);
 
-      // 引用
-      if (trimmed.startsWith('> ')) {
-        const content = parseInline(trimmed.slice(2));
-        result += `<blockquote><p>${content}</p></blockquote>\n`;
+      if (mdMatch || imgTagMatch) {
+        const url = mdMatch ? mdMatch[2] : imgTagMatch[1];
+        const alt = mdMatch ? mdMatch[1] : '';
+        const cleanSrc = url.split('?')[0];
+
+        // 图片防重复：跳过连续相同的图片
+        if (cleanSrc && cleanSrc === lastImageSrc) {
+          i++;
+          continue;
+        }
+        if (cleanSrc) {
+          lastImageSrc = cleanSrc;
+        }
+
+        const altAttr = alt ? ` name="${escapeHtml(alt)}"` : '';
+        body += `<img src="${escapeHtml(url)}"${altAttr}><br>\n`;
+
+        // 检查下一行是否为图注
+        let nextIdx = i + 1;
+        while (nextIdx < rawLines.length && !rawLines[nextIdx].trim()) {
+          nextIdx++;
+        }
+        if (nextIdx < rawLines.length) {
+          const nextTrimmed = rawLines[nextIdx].trim();
+          if (isCaptionText(nextTrimmed)) {
+            const caption = normalizeCaptionText(nextTrimmed);
+            const captionStyle = 'display: block; width: 100%; font-family: PingFangSC-Regular; font-size: 12px; color: rgb(167, 167, 167); text-align: center;';
+            body += `<span class="image-caption" data-image-caption="true" style="${captionStyle}">${escapeHtml(caption)}</span><br>\n`;
+            i = nextIdx + 1;
+            continue;
+          }
+        }
+
+        i++;
         continue;
       }
 
       // 图注
       if (isCaptionText(trimmed)) {
         const caption = normalizeCaptionText(trimmed);
-        result += `<p>${parseInline(caption)}</p>\n`;
+        const captionStyle = 'display: block; width: 100%; font-family: PingFangSC-Regular; font-size: 12px; color: rgb(167, 167, 167); text-align: center;';
+        body += `<span class="image-caption" data-image-caption="true" style="${captionStyle}">${escapeHtml(caption)}</span><br>\n`;
+        i++;
         continue;
       }
 
-      // 普通段落
-      result += `<p>${parseInline(line)}</p>\n`;
-    }
-
-    if (inList) {
-      result += '</ul>\n';
-      inList = false;
+      // 普通文字/标题/列表行：Etherpad 逐行以 <br> 分隔
+      lastImageSrc = '';
+      body += escapeHtml(line) + '<br>\n';
+      i++;
     }
 
     if (addFooterBanner) {
-      result += `<p><img src="${ETHERPAD_FOOTER_BANNER_PNG}" /></p>\n`;
+      body += `<img src="${ETHERPAD_FOOTER_BANNER_PNG}"><br>\n`;
     }
 
-    return result.trim();
+    return `<!doctype html>
+<html lang="en">
+<head>
+<title>Lark2Pad Export</title>
+<meta name="generator" content="Etherpad">
+<meta name="author" content="Etherpad">
+<meta name="changedby" content="Etherpad">
+<meta charset="utf-8">
+<style>
+ol {
+  counter-reset: item;
+}
+
+ol > li {
+  counter-increment: item;
+}
+
+ol ol > li {
+  display: block;
+}
+
+ol > li {
+  display: block;
+}
+
+ol > li:before {
+  content: counters(item, ".") ". ";
+}
+
+ol ol > li:before {
+  content: counters(item, ".") ". ";
+  margin-left: -20px;
+}
+
+ul.indent {
+  list-style-type: none;
+}
+
+img{max-width:100%}
+</style>
+</head>
+<body>
+${body}
+</body>
+</html>`;
   }
 
   function renderRunsToMarkdown(runs = [], fallbackText = '') {
@@ -498,12 +540,15 @@ ${WECHAT_FOOTER_IMAGES_HTML}
 
   function blocksToMarkdown(blocks = []) {
     const lines = [];
+    let lastImageKey = '';
+
     for (const block of blocks) {
       const type = String(block.type || '').toLowerCase();
 
       // Heading
       const headingMatch = type.match(/^heading([1-6])$/i);
       if (headingMatch) {
+        lastImageKey = '';
         const level = Math.min(4, Number(headingMatch[1]));
         const content = renderRunsToMarkdown(block.runs, block.text);
         lines.push(`${'#'.repeat(level)} ${content}`);
@@ -514,13 +559,26 @@ ${WECHAT_FOOTER_IMAGES_HTML}
       // Image
       if (type === 'image' || block.image) {
         const src = block.image?.dataUri || block.image?.currentSrc || block.image?.src || '';
+        const token = block.image?.token || '';
         const alt = block.image?.alt || '';
+        const imageKey = token || (src ? src.split('?')[0] : '');
+
+        // 防重：跳过连续相同的图片
+        if (imageKey && imageKey === lastImageKey) {
+          continue;
+        }
+        if (imageKey) {
+          lastImageKey = imageKey;
+        }
+
         if (src) {
           lines.push(`![${alt}](${src})`);
           lines.push('');
         }
         continue;
       }
+
+      lastImageKey = '';
 
       // List
       if (block.listKind === 'ordered' || type === 'ordered') {
