@@ -119,6 +119,26 @@ ${WECHAT_FOOTER_IMAGES_HTML}
     return false;
   }
 
+  const dataURICache = new Map();
+
+  function cacheDataURI(url, dataUri) {
+    if (!url || !dataUri || !dataUri.startsWith('data:')) return;
+    dataURICache.set(url, dataUri);
+    const clean = url.split('?')[0];
+    if (clean) dataURICache.set(clean, dataUri);
+  }
+
+  function convertImageURLsToBase64DataURIs(html = '') {
+    if (!html || dataURICache.size === 0) return html;
+    let result = html;
+    for (const [url, dataUri] of dataURICache.entries()) {
+      if (url && dataUri && !url.includes('qpic.cn') && !url.includes('weixin.qq.com')) {
+        result = result.replaceAll(url, dataUri);
+      }
+    }
+    return result;
+  }
+
   function parseHeaderWithLevel(line = '') {
     const trimmed = line.trim();
     for (let i = 6; i >= 1; i--) {
@@ -380,7 +400,7 @@ ${WECHAT_FOOTER_IMAGES_HTML}
       }
     }
 
-    return result.trim();
+    return convertImageURLsToBase64DataURIs(result.trim());
   }
 
   /**
@@ -648,6 +668,15 @@ ${body}
     let wechatMarkdown = '';
 
     if (Array.isArray(input)) {
+      for (const block of input) {
+        if (block.type === 'image' || block.image) {
+          const httpSrc = block.image?.originSrc || block.image?.currentSrc || block.image?.src;
+          const dataUri = block.image?.dataUri;
+          if (httpSrc && dataUri) {
+            cacheDataURI(httpSrc, dataUri);
+          }
+        }
+      }
       markdown = blocksToMarkdown(input, { forWechat: false });
       wechatMarkdown = blocksToMarkdown(input, { forWechat: true });
     } else if (typeof input === 'string') {

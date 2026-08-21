@@ -777,43 +777,33 @@ async function extractFeishuDocDirect() {
 
   try {
     let maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-    const step = Math.max(220, Math.floor(container.clientHeight * 0.45));
+    const step = Math.max(280, Math.floor(container.clientHeight * 0.65));
 
-    // 1. 第一轮：从顶部向底部逐屏平滑扫描，等待飞书虚拟 DOM 挂载
+    // 先扫首屏
     container.scrollTop = 0;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
-    await feishuDelay(90);
+    await feishuDelay(40);
     scanVisibleFeishuBlocks(blocksById, sequence);
 
+    // 极速平滑向下扫描
     for (let pos = 0; pos <= maxScroll; pos += step) {
       container.scrollTop = pos;
       container.dispatchEvent(new Event('scroll', { bubbles: true }));
-      await feishuDelay(70);
+      await feishuDelay(25);
       scanVisibleFeishuBlocks(blocksById, sequence);
       maxScroll = Math.max(maxScroll, container.scrollHeight - container.clientHeight);
     }
+
     container.scrollTop = maxScroll;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
-    await feishuDelay(70);
-    scanVisibleFeishuBlocks(blocksById, sequence);
-
-    // 2. 第二轮：从底部向上核对扫描，确保中间长图与代码块全部无遗漏
-    for (let pos = maxScroll; pos >= 0; pos -= step) {
-      container.scrollTop = pos;
-      container.dispatchEvent(new Event('scroll', { bubbles: true }));
-      await feishuDelay(50);
-      scanVisibleFeishuBlocks(blocksById, sequence);
-    }
-    container.scrollTop = 0;
-    container.dispatchEvent(new Event('scroll', { bubbles: true }));
-    await feishuDelay(50);
+    await feishuDelay(25);
     scanVisibleFeishuBlocks(blocksById, sequence);
   } finally {
     container.scrollTop = originalScrollTop;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
   }
 
-  // 3. 按真实文档物理纵向绝对坐标 (top) 严格从头到尾排序，确保文章开头 100% 正确
+  // 按真实文档物理纵向绝对坐标 (top) 严格从头到尾排序
   const blocks = [...blocksById.values()].sort((a, b) => {
     const byTop = (a.top ?? 0) - (b.top ?? 0);
     if (Math.abs(byTop) > 2) return byTop;

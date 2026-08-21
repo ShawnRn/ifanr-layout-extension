@@ -29,8 +29,8 @@
   const metricBrand = document.querySelector('#metric-brand');
 
   const titleImageBrandSelect = document.querySelector('#title-image-brand');
-  const roundImagesToggle = document.querySelector('#round-images');
-  const autoBannersToggle = document.querySelector('#auto-banners');
+  const roundImagesBtn = document.querySelector('#toggle-round-images');
+  const autoBannersBtn = document.querySelector('#toggle-auto-banners');
 
   const resultCard = document.querySelector('#result-card');
   const resultTitle = document.querySelector('#result-title');
@@ -50,6 +50,19 @@
     roundImages: true,
     autoBanners: true
   };
+
+  function updateChipUI() {
+    if (roundImagesBtn) {
+      const active = settings.roundImages !== false;
+      roundImagesBtn.classList.toggle('is-active', active);
+      roundImagesBtn.classList.toggle('is-inactive', !active);
+    }
+    if (autoBannersBtn) {
+      const active = settings.autoBanners !== false;
+      autoBannersBtn.classList.toggle('is-active', active);
+      autoBannersBtn.classList.toggle('is-inactive', !active);
+    }
+  }
 
   let toastTimer = null;
   function showToast(msg) {
@@ -107,8 +120,7 @@
       settings = { ...settings, ...data[SETTINGS_KEY] };
     }
     if (titleImageBrandSelect) titleImageBrandSelect.value = settings.titleImageBrand;
-    if (roundImagesToggle) roundImagesToggle.checked = settings.roundImages !== false;
-    if (autoBannersToggle) autoBannersToggle.checked = settings.autoBanners !== false;
+    updateChipUI();
 
     if (data[CACHE_KEY]) {
       cachedPackage = data[CACHE_KEY];
@@ -579,23 +591,29 @@
     }
   });
 
-  roundImagesToggle?.addEventListener('change', async () => {
+  roundImagesBtn?.addEventListener('click', async () => {
+    settings.roundImages = !settings.roundImages;
+    updateChipUI();
     await saveSettings();
     if (cachedPackage) {
       const input = cachedPackage.rawInput || cachedPackage.markdown || cachedPackage.wechatHtml;
       await performConversion(input, cachedPackage.title, cachedPackage.sourceUrl);
-      showToast(roundImagesToggle.checked ? '已开启图片 8px 连续圆角' : '已关闭图片圆角（直角直出）');
+      showToast(settings.roundImages ? '已开启图片 8px 连续圆角' : '已关闭图片圆角（直角直出）');
     } else {
-      showToast(roundImagesToggle.checked ? '图片圆角已开启' : '图片圆角已关闭');
+      showToast(settings.roundImages ? '图片圆角已开启' : '图片圆角已关闭');
     }
   });
 
-  autoBannersToggle?.addEventListener('change', async () => {
+  autoBannersBtn?.addEventListener('click', async () => {
+    settings.autoBanners = !settings.autoBanners;
+    updateChipUI();
     await saveSettings();
     if (cachedPackage) {
       const input = cachedPackage.rawInput || cachedPackage.markdown || cachedPackage.wechatHtml;
       await performConversion(input, cachedPackage.title, cachedPackage.sourceUrl);
-      showToast('已更新 Banner 设置并重新渲染');
+      showToast(settings.autoBanners ? '已开启品牌 Banner' : '已关闭品牌 Banner');
+    } else {
+      showToast(settings.autoBanners ? '品牌 Banner 已开启' : '品牌 Banner 已关闭');
     }
   });
 
