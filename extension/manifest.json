@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "爱范儿一键排版 (Lark2Pad)",
-  "version": "1.14.0",
+  "version": "2.0.0",
   "description": "一键将飞书文档排版为微信公众号与 Pad 格式，支持剪贴板一键复制与公众号自动注入。",
   "icons": {
     "16": "icons/icon16.png",
