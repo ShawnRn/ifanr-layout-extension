@@ -56,10 +56,49 @@ function cleanCapturedListText(value = '') {
   return globalThis.IFANR_FEISHU_PAGE_READER.cleanListItemText(value);
 }
 
+const FEISHU_UI_NOISE_TEXT = /^(?:添加图标|添加封面|点击添加图标|点击添加封面|更换图标|更换封面|移除封面|移除图标|添加表情|添加背景|添加描述|添加标签|新建页面|关联页面|评论|#|\/\/)$/i;
+
+const FEISHU_HEADER_CONTAINER_SELECTOR = [
+  '.wiki-catalog',
+  '.docx-catalog',
+  '.doc-info-sidebar',
+  '[data-block-type="catalog"]',
+  '.bear-web-catalog',
+  '.docx-page-header',
+  '.doc-header',
+  '.page-header',
+  '.render-unit-header',
+  '.suite-doc-header',
+  '.wiki-header',
+  '.wiki-header-container',
+  '.cover-container',
+  '.icon-container',
+  '.header-actions',
+  '.docx-icon-and-cover',
+  '.page-icon-wrapper',
+  '.page-cover-wrapper',
+  '.doc-title-wrapper',
+  '.doc-title',
+  '.docx-title',
+  '.render-unit-title',
+  '.author-info',
+  '.doc-creator-info',
+  '.page-creator-wrapper',
+  '.doc-info-wrapper',
+  '.comment-box',
+  '.comment-container',
+  '[data-block-type="page_header"]',
+  '[data-block-type="page_banner"]',
+  '[data-block-type="page_icon"]',
+  '[data-block-type="page_cover"]',
+  '[data-block-type="page_title"]',
+  '[data-block-type="title"]'
+].join(', ');
+
 function snapshotFeishuBlock(block, captureSequence) {
   const type = block.getAttribute('data-block-type') || '';
-  if (!type || ['page', 'back_ref_list', 'catalog', 'table_of_contents', 'comment', 'doc_info'].includes(type)) return null;
-  if (block.closest('.wiki-catalog, .docx-catalog, .doc-info-sidebar, [data-block-type="catalog"], .bear-web-catalog')) return null;
+  if (!type || ['page', 'back_ref_list', 'catalog', 'table_of_contents', 'comment', 'doc_info', 'page_header', 'page_banner', 'page_icon', 'page_cover', 'page_title', 'doc_header', 'title', 'icon', 'cover'].includes(type)) return null;
+  if (block.closest(FEISHU_HEADER_CONTAINER_SELECTOR)) return null;
 
   const rawId = block.getAttribute('data-block-id') || block.getAttribute('data-record-id') || '';
   const rect = block.getBoundingClientRect();
@@ -69,6 +108,12 @@ function snapshotFeishuBlock(block, captureSequence) {
 
   if (type === 'image') {
     const image = block.querySelector('.image-block img, img.docx-image, img');
+    if (!image) return null;
+    if (image.closest('.author-info, .avatar, .user-avatar, .doc-creator-info, .header-actions, .docx-icon-and-cover, .page-icon-wrapper')) return null;
+    const width = Number(image?.naturalWidth || image?.width || 0);
+    const height = Number(image?.naturalHeight || image?.height || 0);
+    if ((width > 0 && width < 48) || (height > 0 && height < 48)) return null;
+
     const imageBlock = block.querySelector('[image-token]') || block.closest('[image-token]') || block;
     const token = imageBlock?.getAttribute('image-token') || block.getAttribute('data-record-id') || null;
     const originSrc = image?.getAttribute('data-origin-src') || image?.getAttribute('data-full-src') || image?.getAttribute('data-src') || image?.getAttribute('data-url') || null;
@@ -88,12 +133,20 @@ function snapshotFeishuBlock(block, captureSequence) {
         srcset,
         alt: image?.alt || '',
         token,
-        width: Number(image?.naturalWidth || image?.width || 0),
-        height: Number(image?.naturalHeight || image?.height || 0)
+        width,
+        height
       }
     };
   }
+
   const rawText = globalThis.IFANR_FEISHU_PAGE_READER.cleanText(block.innerText || block.textContent || '');
+  if (FEISHU_UI_NOISE_TEXT.test(rawText.trim())) return null;
+
+  const currentTitle = feishuTitle();
+  if (currentTitle && rawText === currentTitle && (block.tagName === 'H1' || block.querySelector('h1') || block.closest('.doc-title, .render-unit-title, .docx-title, .bear-web-title') || top < 250)) {
+    return null;
+  }
+
   const className = String(block.className || '');
   const caption = /(?:^|[-_])(?:image[-_])?(?:caption|description)(?:$|[-_])/i.test(className);
   const explicitListKind = type === 'ordered'
@@ -120,14 +173,34 @@ function snapshotFeishuBlock(block, captureSequence) {
 }
 
 function scanVisibleFeishuBlocks(blocksById, sequence) {
+  const seenImageTokens = new Set();
+  for (const b of blocksById.values()) {
+    if (b.image?.token) seenImageTokens.add(b.image.token);
+    if (b.image?.src) seenImageTokens.add(b.image.src.split('?')[0]);
+  }
+
   for (const element of document.querySelectorAll('[data-block-id]')) {
-    if (element.closest('.wiki-catalog, .docx-catalog, .doc-info-sidebar, [data-block-type="catalog"], .bear-web-catalog')) continue;
+    if (element.closest(FEISHU_HEADER_CONTAINER_SELECTOR)) continue;
+    if (element.parentElement?.closest('[data-block-id][data-block-type="image"]')) continue;
+
     const rawId = element.getAttribute('data-block-id') || element.getAttribute('data-record-id') || '';
     if (!rawId) continue;
     const key = rawId || `observed-${sequence.next}`;
     const previous = blocksById.get(key);
     const snapshot = snapshotFeishuBlock(element, previous?.captureSequence || sequence.next);
     if (!snapshot) continue;
+
+    // 图片 Token 去重
+    if (snapshot.type === 'image' || snapshot.image) {
+      const token = snapshot.image?.token;
+      const srcKey = snapshot.image?.src ? snapshot.image.src.split('?')[0] : '';
+      if (!previous && ((token && seenImageTokens.has(token)) || (srcKey && seenImageTokens.has(srcKey)))) {
+        continue;
+      }
+      if (token) seenImageTokens.add(token);
+      if (srcKey) seenImageTokens.add(srcKey);
+    }
+
     if (!previous) sequence.next += 1;
     if (previous && snapshot.top > 0) {
       previous.top = snapshot.top;
