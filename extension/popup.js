@@ -36,15 +36,23 @@
   const resultTitle = document.querySelector('#result-title');
   const resultCopy = document.querySelector('#result-copy');
   const toastMsg = document.querySelector('#toast-msg');
+  const injectionProgress = document.querySelector('#injection-progress');
+  const injectionProgressTitle = document.querySelector('#injection-progress-title');
+  const injectionProgressPercent = document.querySelector('#injection-progress-percent');
+  const injectionProgressBar = document.querySelector('#injection-progress-bar');
+  const injectionProgressTrack = injectionProgress?.querySelector('[role="progressbar"]');
+  const injectionProgressMessage = document.querySelector('#injection-progress-message');
 
   // Keys
   const CACHE_KEY = 'ifanrLark2PadCache';
   const ARTICLE_PKG_KEY = 'ifanrArticlePackage';
   const SETTINGS_KEY = 'ifanrLark2PadSettings';
+  const WECHAT_WRITE_STATUS_KEY = 'ifanrWechatWriteStatus';
 
   let activeTab = null;
   let cachedPackage = null;
   let targetPlatform = 'wechat'; // 'wechat' | 'pad'
+  let activeInjectionRequestId = null;
   let settings = {
     titleImageBrand: 'auto',
     roundImages: true,
@@ -79,6 +87,34 @@
     if (statusTag) statusTag.textContent = tag;
     if (statusMsg) statusMsg.textContent = message;
   }
+
+  function renderInjectionProgress({ percent = 0, message = '', state = 'processing', title = '' } = {}) {
+    if (!injectionProgress) return;
+    const boundedPercent = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+    injectionProgress.hidden = false;
+    injectionProgress.dataset.state = state;
+    if (injectionProgressTitle) {
+      injectionProgressTitle.textContent = title || (
+        state === 'completed' ? '注入完成' : state === 'failed' ? '注入未完成' : '正在注入公众号'
+      );
+    }
+    if (injectionProgressPercent) injectionProgressPercent.textContent = `${boundedPercent}%`;
+    if (injectionProgressBar) injectionProgressBar.style.width = `${boundedPercent}%`;
+    if (injectionProgressTrack) injectionProgressTrack.setAttribute('aria-valuenow', String(boundedPercent));
+    if (injectionProgressMessage) injectionProgressMessage.textContent = message || '正在处理';
+  }
+
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !activeInjectionRequestId) return;
+    const status = changes[WECHAT_WRITE_STATUS_KEY]?.newValue;
+    if (!status || status.requestId !== activeInjectionRequestId) return;
+    const progress = status.progress || {};
+    renderInjectionProgress({
+      percent: progress.percent || (status.state === 'completed' ? 100 : 0),
+      message: progress.message || status.error?.code || '正在处理',
+      state: status.state === 'failed' ? 'failed' : status.state === 'completed' ? 'completed' : 'processing'
+    });
+  });
 
   async function showBadgeSuccess() {
     try {
@@ -276,7 +312,10 @@
     if (urls.length === 0) return html;
 
     let updatedHtml = html;
-    await Promise.all(urls.map(async (url) => {
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < urls.length) {
+        const url = urls[cursor++];
       try {
         let fetchUrl = url;
         if (fetchUrl.includes('preview_type=16')) {
@@ -286,10 +325,20 @@
         if (res.ok) {
           const contentType = (res.headers.get('content-type') || '').toLowerCase();
           if (contentType.includes('application/json') || contentType.includes('text/html')) {
-            return;
+            continue;
           }
-          const blob = await res.blob();
+          let blob = await res.blob();
           if (blob && blob.size > 200) {
+            const mime = String(blob.type || '').toLowerCase().split(';')[0];
+            if (mime !== 'image/gif' && globalThis.IFANR_LARK_IMAGE_PROCESSOR?.processStaticImage) {
+              const processed = await globalThis.IFANR_LARK_IMAGE_PROCESSOR.processStaticImage(blob, {
+                maxWidth: 1280,
+                roundImages: settings.roundImages,
+                quality: 0.86,
+                deadlineAt: Date.now() + 30000
+              });
+              blob = processed.blob || blob;
+            }
             const dataUri = await new Promise((resolve) => {
               const reader = new FileReader();
               reader.onloadend = () => resolve(reader.result);
@@ -307,9 +356,23 @@
       } catch (e) {
         console.warn('Failed to convert image to DataURI:', url, e);
       }
-    }));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, urls.length) }, () => worker()));
 
     return updatedHtml;
+  }
+
+  function validationPlainText(value = '') {
+    return String(value || '')
+      .replace(/!\[[^\]]*\]\([^\n)]+\)/g, '')
+      .replace(/\[([^\]]+)\]\([^\n)]+\)/g, '$1')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/^#{1,6}\s+/gm, '')
+      .replace(/^>\s?/gm, '')
+      .replace(/[*_`~\\]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   /**
@@ -330,6 +393,7 @@
     });
 
     const wechatHtml = await ensureWechatImagesAreBase64(converted.wechatHtml);
+    const validationText = validationPlainText(converted.cleanMarkdown || converted.markdown || '');
 
     const pkg = {
       title: cleanDisplayTitle(title),
@@ -344,6 +408,8 @@
       etherpadHtml: converted.etherpadHtml,
       imageCount: converted.imageCount,
       blockCount: converted.blockCount,
+      expectedTextTail: validationText.slice(-120),
+      expectedMinimumTextLength: Math.max(0, validationText.replace(/\s+/g, '').length - 80),
       convertedAt: new Date().toISOString()
     };
 
@@ -371,6 +437,11 @@
       activeTab = tab;
     }
 
+    if (!activeTab?.url?.includes('feishu.cn/wiki/') && !activeTab?.url?.includes('feishu.cn/docx/')) {
+      const tabs = await chrome.tabs.query({ currentWindow: true });
+      activeTab = tabs.find((tab) => tab.url?.includes('feishu.cn/wiki/') || tab.url?.includes('feishu.cn/docx/')) || activeTab;
+    }
+
     const isFeishu = activeTab?.url && (activeTab.url.includes('feishu.cn/wiki/') || activeTab.url.includes('feishu.cn/docx/'));
 
     setStatus('读取中', '正在自动扫描并读取飞书文档…');
@@ -381,35 +452,39 @@
       let docUrl = activeTab?.url || '';
 
       if (isFeishu) {
-        const response = await chrome.tabs.sendMessage(activeTab.id, {
-          type: 'IFANR_EXTRACT_FEISHU_DIRECT'
-        }).catch(async () => {
-          const [execResult] = await chrome.scripting.executeScript({
-            target: { tabId: activeTab.id },
-            func: () => {
-              const h1 = document.querySelector('h1');
-              const title = h1?.innerText?.trim() || document.title.replace(/\s*-\s*飞书云文档\s*$/i, '').trim();
-              const container = document.querySelector('.bear-web-x-container') || document.body;
-              return {
-                ok: true,
-                title,
-                sourceUrl: location.href,
-                html: container?.innerHTML || ''
-              };
+        setStatus('全文读取中', '正在静默获取飞书 Markdown 全文并处理原图…');
+        const response = await chrome.runtime.sendMessage({
+          type: 'IFANR_COMPILE_FEISHU',
+          source: {
+            canonicalUrl: docUrl,
+            tabId: activeTab.id,
+            titleImageBrand: settings.titleImageBrand,
+            staticImageQuality: 90,
+            options: {
+              larkImageProcessing: true,
+              larkRoundImages: settings.roundImages,
+              larkMaxImageWidth: 1280
             }
-          });
-          return execResult?.result;
+          }
         });
 
-        if (response?.ok && (response.blocks?.length || response.html)) {
-          docTitle = cleanDisplayTitle(response.title) || docTitle;
-          docUrl = response.sourceUrl || docUrl;
-          const inputData = (response.blocks && response.blocks.length > 0) ? response.blocks : response.html;
-          const pkg = await performConversion(inputData, docTitle, docUrl);
+        if (!response?.ok) {
+          const error = response?.error || {};
+          throw Object.assign(new Error(error.message || '飞书全文读取失败'), error);
+        }
+
+        const stored = await chrome.storage.local.get(ARTICLE_PKG_KEY);
+        const fixture = stored[ARTICLE_PKG_KEY];
+        const fullInput = fixture?.rawMarkdown || (fixture?.rawBlocks?.length ? fixture.rawBlocks : null);
+        if (fullInput) {
+          docTitle = cleanDisplayTitle(fixture.title) || docTitle;
+          docUrl = fixture.sourceUrl || docUrl;
+          const pkg = await performConversion(fullInput, docTitle, docUrl);
           setStatus('转换完成', `已转换 ${pkg.blockCount} 个内容块，${pkg.imageCount} 张图片`);
           showToast('已自动读取全文并生成公众号/Pad 排版！');
           return;
         }
+        throw new Error('飞书全文读取完成，但没有找到可转换的内容块');
       }
 
       // 如果非飞书页面，从剪贴板读取
@@ -454,6 +529,28 @@
   /**
    * 复制微信公众号富文本
    */
+  function copyRichTextWithLegacyEvent(html, text) {
+    return new Promise((resolve, reject) => {
+      const onCopy = (event) => {
+        event.preventDefault();
+        event.clipboardData?.setData('text/html', html);
+        event.clipboardData?.setData('text/plain', text || '');
+      };
+      document.addEventListener('copy', onCopy, { once: true });
+      let copied = false;
+      try {
+        copied = Boolean(document.execCommand?.('copy'));
+      } catch {
+        copied = false;
+      }
+      if (copied) resolve(true);
+      else {
+        document.removeEventListener('copy', onCopy);
+        reject(new Error('CLIPBOARD_RICH_TEXT_COPY_FAILED'));
+      }
+    });
+  }
+
   async function copyWechat() {
     if (!cachedPackage || !cachedPackage.wechatHtml) {
       await convertCurrentFeishuDoc();
@@ -467,12 +564,17 @@
       if (navigator.clipboard?.write && window.ClipboardItem && html) {
         const blobHtml = new Blob([html], { type: 'text/html' });
         const blobText = new Blob([text], { type: 'text/plain' });
-        await navigator.clipboard.write([new ClipboardItem({
-          'text/html': blobHtml,
-          'text/plain': blobText
-        })]);
+        try {
+          await navigator.clipboard.write([new ClipboardItem({
+            'text/html': blobHtml,
+            'text/plain': blobText
+          })]);
+        } catch (clipboardError) {
+          console.warn('ClipboardItem rich text copy unavailable, using copy event fallback.', clipboardError);
+          await copyRichTextWithLegacyEvent(html, text);
+        }
       } else {
-        await navigator.clipboard.writeText(html);
+        await copyRichTextWithLegacyEvent(html, text);
       }
 
       showToast('已复制微信公众号排版！可直接粘贴至公众号草稿');
@@ -591,10 +693,15 @@
    */
   async function injectToWechatTab(tabId) {
     setStatus('注入中', '正在向微信公众号草稿写入正文…');
+    const requestId = globalThis.crypto?.randomUUID?.() || `inject-${Date.now()}`;
+    activeInjectionRequestId = requestId;
+    renderInjectionProgress({ percent: 1, message: '正在连接公众号编辑器' });
+    if (mainInjectBtn) mainInjectBtn.disabled = true;
 
     try {
       const response = await chrome.tabs.sendMessage(tabId, {
         type: 'IFANR_INJECT_HTML',
+        requestId,
         html: cachedPackage.wechatHtml,
         title: cachedPackage.title,
         sourceUrl: cachedPackage.sourceUrl,
@@ -602,44 +709,41 @@
           roundImages: settings.roundImages,
           titleImageBrand: cachedPackage.brand || settings.titleImageBrand,
           forceEditorReplace: true,
-          requireHostedImages: false
+          requireHostedImages: true,
+          expectedImageCount: Number(cachedPackage.imageCount || 0),
+          sourceImageCount: Number(cachedPackage.imageCount || 0),
+          expectedTextContains: cachedPackage.expectedTextTail || '',
+          expectedMinimumTextLength: Number(cachedPackage.expectedMinimumTextLength || 0),
+          timeoutMs: 90000
         }
       }).catch(() => null);
 
-      if (!response || !response.ok) {
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          args: [cachedPackage.wechatHtml, cachedPackage.title],
-          func: (htmlContent, docTitle) => {
-            const editor = document.querySelector('#ueditor_0 .ProseMirror') ||
-                           document.querySelector('.ProseMirror[contenteditable="true"]') ||
-                           document.querySelector('[contenteditable="true"][data-wechat-editor]') ||
-                           document.querySelector('[contenteditable="true"]');
-            if (editor) {
-              editor.innerHTML = htmlContent;
-              editor.dispatchEvent(new Event('input', { bubbles: true }));
-              editor.dispatchEvent(new Event('change', { bubbles: true }));
-
-              const titleInput = document.querySelector('input#title, textarea#title, .js_title, [placeholder*="标题"]');
-              if (titleInput && docTitle && !titleInput.value) {
-                titleInput.value = docTitle;
-                titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-                titleInput.dispatchEvent(new Event('change', { bubbles: true }));
-              }
-              return { ok: true };
-            }
-            return { ok: false };
-          }
-        });
+      // Never overwrite an adapter result with the old unthrottled raw-DOM
+      // fallback; that path reintroduces the large Base64 freeze and tail loss.
+      if (response && !response.ok) {
+        throw Object.assign(new Error(response.error || '公众号图片托管未完成'), { result: response.result });
       }
+
+      if (!response) throw new Error('公众号页面脚本未就绪，请刷新公众号编辑页后重试');
 
       showToast('已成功注入微信公众号草稿！');
       setStatus('注入成功', '公众号草稿已写入，可切换到公众号页面查看');
       showResult('注入完成', '正文与标题已成功填入公众号草稿。', 'success');
+      renderInjectionProgress({ percent: 100, message: '正文、图片和保存状态已确认', state: 'completed' });
     } catch (err) {
       console.error('WeChat inject error:', err);
+      renderInjectionProgress({
+        percent: Number(err.result?.confirmedStagedImageCount || 0) > 0
+          ? Math.round(88 * Number(err.result.confirmedStagedImageCount) / Math.max(1, Number(err.result.stagedImageCount || cachedPackage.imageCount || 1)))
+          : 0,
+        message: err.message || '公众号图片托管未完成',
+        state: 'failed'
+      });
       await copyWechat();
       showToast('注入受阻，已为您自动复制排版富文本，直接粘贴即可！');
+    } finally {
+      activeInjectionRequestId = null;
+      if (mainInjectBtn) mainInjectBtn.disabled = false;
     }
   }
 

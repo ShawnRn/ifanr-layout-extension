@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Lark image processor smoke test</title>
+</head>
+<body>
+  <pre id="output">RUNNING</pre>
+  <script src="../extension/lark-image-processor.js"></script>
+  <script>
+    (async () => {
+      const source = document.createElement('canvas');
+      source.width = 1400;
+      source.height = 900;
+      const context = source.getContext('2d', { alpha: false });
+      const pixels = context.createImageData(source.width, source.height);
+      for (let index = 0; index < pixels.data.length; index += 4) {
+        const pixel = index / 4;
+        pixels.data[index] = (pixel * 17) % 256;
+        pixels.data[index + 1] = (pixel * 31 + Math.floor(pixel / source.width) * 13) % 256;
+        pixels.data[index + 2] = (pixel * 47) % 256;
+        pixels.data[index + 3] = 255;
+      }
+      context.putImageData(pixels, 0, 0);
+      const input = await new Promise((resolve) => source.toBlob(resolve, 'image/png'));
+      const processor = globalThis.IFANR_LARK_IMAGE_PROCESSOR;
+      const rounded = await processor.processStaticImage(input, {
+        width: source.width,
+        height: source.height,
+        maxWidth: 1280,
+        roundImages: true
+      });
+      const plain = await processor.processStaticImage(input, {
+        width: source.width,
+        height: source.height,
+        maxWidth: 1280,
+        roundImages: false
+      });
+
+      const bitmap = await createImageBitmap(rounded.blob);
+      const probe = document.createElement('canvas');
+      probe.width = bitmap.width;
+      probe.height = bitmap.height;
+      const probeContext = probe.getContext('2d');
+      probeContext.drawImage(bitmap, 0, 0);
+      const cornerAlpha = probeContext.getImageData(0, 0, 1, 1).data[3];
+      bitmap.close();
+
+      const pass = rounded.mime === 'image/png' &&
+        rounded.blob.type === 'image/png' &&
+        rounded.width <= 1280 &&
+        rounded.blob.size <= processor.WECHAT_IMAGE_MAX_BYTES &&
+        cornerAlpha === 0 &&
+        plain.mime === 'image/jpeg' &&
+        plain.blob.type === 'image/jpeg';
+      document.querySelector('#output').textContent = JSON.stringify({
+        pass,
+        inputBytes: input.size,
+        roundedBytes: rounded.blob.size,
+        roundedMime: rounded.mime,
+        roundedDimensions: [rounded.width, rounded.height],
+        cornerAlpha,
+        plainBytes: plain.blob.size,
+        plainMime: plain.mime
+      });
+      document.title = pass ? 'PASS' : 'FAIL';
+    })().catch((error) => {
+      document.querySelector('#output').textContent = JSON.stringify({ pass: false, error: error.message });
+      document.title = 'FAIL';
+    });
+  </script>
+</body>
+</html>

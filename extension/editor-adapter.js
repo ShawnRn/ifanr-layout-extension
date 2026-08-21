@@ -37,6 +37,9 @@
 
   const SAVED_TEXT = /已保存|保存成功|草稿已保存/i;
   const DEFAULT_IMAGE_STALL_TIMEOUT_MS = 8000;
+  const DEFAULT_IMAGE_UPLOAD_BATCH_SIZE = 3;
+  const DEFAULT_IMAGE_BATCH_TIMEOUT_MS = 10000;
+  const DEFAULT_IMAGE_BATCH_MAX_ENCODED_BYTES = 10 * 1024 * 1024;
   const DEFAULT_SAVE_STALL_TIMEOUT_MS = 3000;
   const BODY_EDIT_STYLE = 'margin:0 16px 24px;color:#222222;font-size:15px;font-family:"PingFangSC-Light","PingFang SC",-apple-system,BlinkMacSystemFont,"Microsoft YaHei",sans-serif;font-weight:300;line-height:1.8;letter-spacing:0.02em;';
 
@@ -322,19 +325,23 @@
         order: Number(rawOrder) || null,
         mediaName: image.dataset.ifanrMediaName || imageContainer?.dataset.mediaName || null,
         animated: (image.dataset.ifanrImageKind || imageContainer?.dataset.ifanrImageKind) === 'gif',
+        complete: image.complete,
+        naturalWidth: Number(image.naturalWidth || 0),
+        naturalHeight: Number(image.naturalHeight || 0),
+        loaded: image.complete && Number(image.naturalWidth || 0) > 0,
         width: Math.round(rect.width),
         height: Math.round(rect.height),
         visible: rect.width > 1 && rect.height > 1 && style?.display !== 'none' && style?.visibility !== 'hidden'
       };
     });
     const pendingKinds = new Set(['data', 'blob', 'extension', 'relative', 'invalid']);
-    const pendingImages = details.filter((item) => pendingKinds.has(item.kind));
-    const visibleHostedImages = details.filter((item) => item.visible && !pendingKinds.has(item.kind));
+    const pendingImages = details.filter((item) => pendingKinds.has(item.kind) || (item.order && !item.loaded));
+    const visibleHostedImages = details.filter((item) => item.visible && item.loaded && !pendingKinds.has(item.kind));
     return {
       imageCount: images.length,
       visibleImageCount: details.filter((item) => item.visible).length,
       visibleHostedImageCount: visibleHostedImages.length,
-      hostedImageCount: details.filter((item) => !pendingKinds.has(item.kind)).length,
+      hostedImageCount: details.filter((item) => item.loaded && !pendingKinds.has(item.kind)).length,
       imageSourceKinds: details.map((item) => item.kind),
       imageSourceDetails: details,
       pendingEmbeddedImageCount: pendingImages.length,
@@ -360,7 +367,7 @@
     return false;
   }
 
-  function sanitizeArticleHtml(html) {
+  function sanitizeArticleTemplate(html) {
     const template = document.createElement('template');
     template.innerHTML = String(html || '');
     const blockedTags = 'script,style,iframe,object,embed,link,meta,base,form,input,button,textarea,select,option,video,audio,canvas,svg,math';
@@ -387,7 +394,11 @@
         }
       }
     }
-    return template.innerHTML;
+    return template;
+  }
+
+  function sanitizeArticleHtml(html) {
+    return sanitizeArticleTemplate(html).innerHTML;
   }
 
   function nodeHasEditableContent(node) {
@@ -744,6 +755,47 @@
     return `force-root-replacement+${replaceEditorHtml(editor, html)}`;
   }
 
+  async function pasteFullArticleOnce(editor, html, forceRoot = true) {
+    editor.focus();
+    if (forceRoot) editor.replaceChildren();
+    const selection = global.getSelection?.();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    let pasteHandled = false;
+    try {
+      const clipboardData = new DataTransfer();
+      clipboardData.setData('text/html', html);
+      clipboardData.setData('text/plain', '');
+      const pasteEvent = new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clipboardData
+      });
+      // WeChat's editor must receive one paste transaction so its native image
+      // uploader sees every data URI. Direct DOM/input events preserve text but
+      // do not enqueue images for hosting.
+      pasteHandled = editor.dispatchEvent(pasteEvent) === false || pasteEvent.defaultPrevented;
+    } catch {
+      pasteHandled = false;
+    } finally {
+      selection?.removeAllRanges();
+    }
+
+    await wait(120);
+    const inserted = Boolean(editor.querySelector('[data-ifanr-template],img')) ||
+      normalizeValidationText(editor.innerText || editor.textContent || '').length > 0;
+    if (pasteHandled && inserted) return 'single-rich-text-paste';
+
+    // Compatibility fallback for editor builds that ignore untrusted paste.
+    return forceRoot
+      ? `single-paste-ignored+${forceReplaceEditorHtml(editor, html)}`
+      : `single-paste-ignored+${replaceEditorHtml(editor, html)}`;
+  }
+
   async function refreshManualFormatting(options = {}) {
     const editorSelection = findWechatEditor(options.editorSelectors || DEFAULT_EDITOR_SELECTORS);
     const editor = editorSelection.editor;
@@ -790,22 +842,76 @@
     return `dom-style-recovery+${replaceEditorHtml(editor, html)}`;
   }
 
-  function stageAllImages(html, manualImageReplacements = []) {
-    const template = document.createElement('template');
-    template.innerHTML = html;
+  function extractEmbeddedImagePayloads(html) {
+    const sources = [];
+    const skeletonHtml = String(html || '').replace(
+      /(<img\b[^>]*?\bsrc\s*=\s*)(["'])(data:image\/(?:jpeg|png|gif|webp);base64,[^"']+)\2/gi,
+      (_match, prefix, quote, source) => {
+        const id = sources.length;
+        sources.push(source);
+        return `${prefix}${quote}${quote} data-ifanr-embedded-image-id="${id}"`;
+      }
+    );
+    return {
+      skeletonHtml,
+      sources,
+      count: sources.length,
+      bytes: sources.reduce((total, source) => total + source.length, 0)
+    };
+  }
+
+  function stageAllImages(htmlOrTemplate, manualImageReplacements = [], embeddedSources = []) {
+    const template = typeof htmlOrTemplate === 'string'
+      ? (() => {
+        const value = document.createElement('template');
+        value.innerHTML = htmlOrTemplate;
+        return value;
+      })()
+      : htmlOrTemplate;
     const manualByOrder = new Map((manualImageReplacements || []).map((item) => [Number(item.order), item]));
-    const stagedImages = [...template.content.querySelectorAll('img[data-ifanr-image-order]')]
-      .filter((image) => (image.getAttribute('src') || '').startsWith('data:image/'))
-      .map((image, index) => {
-        const container = image.closest('[data-ifanr-image-order], [data-media-name]');
-        const order = Number(image.dataset.ifanrImageOrder || container?.dataset.ifanrImageOrder || 0);
+    const embeddedImages = [...template.content.querySelectorAll('img')]
+      .map((image) => {
+        const embeddedId = Number(image.dataset.ifanrEmbeddedImageId);
+        const extractedSource = Number.isInteger(embeddedId) && embeddedId >= 0
+          ? embeddedSources[embeddedId]
+          : '';
+        const source = extractedSource || image.getAttribute('src') || '';
+        return { image, embeddedId, source };
+      })
+      .filter((item) => item.source.startsWith('data:image/'));
+    const usedOrders = new Set();
+    let generatedOrder = 1;
+    const stagedImages = embeddedImages
+      .map(({ image, embeddedId, source }, index) => {
+        // Lark2Pad exports every image in one rich-text payload and does not
+        // require private tracking attributes. Assign stable orders here so
+        // those same images can be hosted by WeChat in bounded batches.
+        const container = image.parentElement?.closest?.('[data-ifanr-image-order], [data-media-name]') || image.parentElement;
+        let order = Number(image.dataset.ifanrImageOrder || container?.dataset.ifanrImageOrder || 0);
+        if (!(order > 0) || usedOrders.has(order)) {
+          while (usedOrders.has(generatedOrder)) generatedOrder += 1;
+          order = generatedOrder;
+          generatedOrder += 1;
+        }
+        usedOrders.add(order);
         const kind = image.dataset.ifanrImageKind || container?.dataset.ifanrImageKind || 'static';
         const isTitle = image.dataset.ifanrTitleImage === 'true' ||
           container?.dataset.ifanrTitleImage === 'true' ||
           image.parentElement?.dataset.ifanrTitleImage === 'true' ||
           Boolean(image.closest?.('[data-ifanr-title-image="true"]'));
         const suffix = kind === 'gif' ? 'gif' : 'image';
-        const mediaName = image.dataset.ifanrMediaName || container?.dataset.ifanrMediaName || container?.dataset.mediaName || `${suffix}-${index + 1}`;
+        const mediaName = image.dataset.ifanrMediaName || container?.dataset.ifanrMediaName || container?.dataset.mediaName || image.getAttribute('alt') || `${suffix}-${index + 1}`;
+        image.dataset.ifanrImageOrder = String(order);
+        image.dataset.ifanrImageKind = kind;
+        image.dataset.ifanrMediaName = mediaName;
+        image.removeAttribute('data-ifanr-embedded-image-id');
+        image.removeAttribute('src');
+        if (Number.isInteger(embeddedId) && embeddedId >= 0) embeddedSources[embeddedId] = '';
+        if (container && container !== image) {
+          container.dataset.ifanrImageOrder = String(order);
+          container.dataset.ifanrImageKind = kind;
+          container.dataset.ifanrMediaName = mediaName;
+        }
         const manual = manualByOrder.get(order);
         if (manual) {
           const marker = document.createElement('span');
@@ -830,7 +936,8 @@
           mediaName,
           kind,
           isTitle: Boolean(isTitle),
-          html: image.outerHTML
+          html: image.outerHTML,
+          source
         };
         image.replaceWith(placeholder);
         return item;
@@ -844,12 +951,14 @@
     };
   }
 
-  function insertStagedImage(editor, item) {
+  async function insertStagedImage(editor, item) {
     const placeholder = editor.querySelector(`[data-ifanr-image-placeholder="${item.order}"]`);
-    const container = placeholder?.closest('[data-ifanr-image-order]') ||
+    const container = placeholder?.parentElement?.closest?.('[data-ifanr-image-order]') ||
       editor.querySelector(`[data-ifanr-image-order="${item.order}"]`);
     const target = placeholder || container;
     if (!target) return { inserted: false, method: 'placeholder-not-found' };
+    const imageHtml = item.html.replace(/<img\b/i, `<img src="${item.source}"`);
+    const imagesBeforePaste = new Set(editor.querySelectorAll('img'));
 
     editor.focus();
     const selection = global.getSelection?.();
@@ -859,39 +968,56 @@
     selection?.removeAllRanges();
     selection?.addRange(range);
 
-    let inserted = false;
+    let pasteDispatched = false;
     try {
-      inserted = Boolean(document.execCommand?.('insertHTML', false, item.html));
+      const clipboardData = new DataTransfer();
+      clipboardData.setData('text/html', imageHtml);
+      clipboardData.setData('text/plain', item.mediaName || '');
+      const pasteEvent = new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clipboardData
+      });
+      editor.dispatchEvent(pasteEvent);
+      pasteDispatched = true;
     } catch {
-      inserted = false;
+      pasteDispatched = false;
     }
     selection?.removeAllRanges();
 
-    let positionRestored = false;
-    if (inserted && placeholder?.isConnected) {
-      const insertedImage = [...editor.querySelectorAll(`img[data-ifanr-image-order="${item.order}"]`)]
-        .find((image) => (image.getAttribute('src') || '').startsWith('data:image/'));
-      if (insertedImage) {
-        if (!container?.contains(insertedImage)) {
-          placeholder.replaceWith(insertedImage);
-          positionRestored = true;
-        } else {
-          placeholder.remove();
-        }
+    // Give the editor's paste handler a frame to create its transaction.
+    await wait(240);
+    const newImages = [...editor.querySelectorAll('img')].filter((image) => !imagesBeforePaste.has(image));
+    const pastedImage = [...editor.querySelectorAll(`img[data-ifanr-image-order="${item.order}"]`)]
+      .find((image) => Boolean(image.getAttribute('src'))) ||
+      newImages.find((image) => Boolean(image.getAttribute('src'))) ||
+      container?.querySelector?.('img[src]');
+    const pasteInserted = Boolean(pastedImage) || (placeholder ? !placeholder.isConnected : false);
+    if (pasteDispatched && pasteInserted) {
+      let positionRestored = !placeholder?.isConnected || Boolean(container?.contains?.(pastedImage));
+      if (placeholder?.isConnected && pastedImage && !container?.contains?.(pastedImage)) {
+        placeholder.replaceWith(pastedImage);
+        dispatchEditorMutation(editor, 'insertFromPaste');
+        positionRestored = true;
       }
+      return {
+        inserted: true,
+        method: 'synthetic-rich-text-paste',
+        positionRestored,
+        anchor: container
+      };
     }
 
-    if (!inserted && placeholder) {
-      placeholder.outerHTML = item.html;
-    } else if (!inserted && container) {
-      container.innerHTML = item.html;
-    }
-    editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: null }));
-    editor.dispatchEvent(new Event('change', { bubbles: true }));
+    // Older editor builds may ignore untrusted paste events. Keep a bounded
+    // full-article transaction as a compatibility fallback, never a whole
+    // unbounded Base64 article.
+    if (placeholder?.isConnected) placeholder.outerHTML = imageHtml;
+    else if (container?.isConnected) container.innerHTML = imageHtml;
     return {
       inserted: true,
-      method: inserted ? 'selection-insert-html' : 'dom-image-fallback',
-      positionRestored,
+      method: 'batch-dom-materialization-fallback',
+      positionRestored: true,
       anchor: container
     };
   }
@@ -921,11 +1047,270 @@
   function imageOrderConfirmed(inspection, order) {
     const matching = inspection.imageSourceDetails.filter((item) => item.order === order);
     const pendingKinds = new Set(['data', 'blob', 'extension', 'relative', 'invalid']);
-    return matching.some((item) => item.visible && !pendingKinds.has(item.kind)) &&
-      !matching.some((item) => pendingKinds.has(item.kind));
+    return matching.some((item) => item.visible && item.loaded && !pendingKinds.has(item.kind)) &&
+      !matching.some((item) => pendingKinds.has(item.kind) || !item.loaded);
+  }
+
+  function imageUploadAttemptConfirmed(inspection, attempt) {
+    if (imageOrderConfirmed(inspection, attempt.order)) return true;
+    const anchor = attempt.anchor;
+    if (!anchor?.isConnected) return false;
+    const images = anchor.tagName === 'IMG' ? [anchor] : [...anchor.querySelectorAll('img')];
+    return images.some((image) => {
+      const src = image.getAttribute('src') || '';
+      if (!/^https?:\/\//i.test(src)) return false;
+      const rect = image.getBoundingClientRect();
+      const style = global.getComputedStyle?.(image);
+      return image.complete && image.naturalWidth > 0 && rect.width > 1 && rect.height > 1 && style?.display !== 'none' && style?.visibility !== 'hidden';
+    });
+  }
+
+  async function injectHtmlAtomic(html, options = {}) {
+    const startedAt = Date.now();
+    const timeoutMs = Number(options.timeoutMs || 90000);
+    const deadlineAt = startedAt + timeoutMs;
+    await emitProgress(options, { phase: 'preparing-write', percent: 2, message: '正在确认公众号编辑器' });
+    const editorSelection = findWechatEditor(options.editorSelectors || DEFAULT_EDITOR_SELECTORS);
+    const editor = editorSelection.editor;
+    if (!editor) throw new Error('WECHAT_EDITOR_NOT_FOUND');
+    const editorDiagnostics = {
+      editorCandidateCount: editorSelection.candidateCount,
+      selectedEditor: editorSelection.selected,
+      editorCandidates: editorSelection.candidates
+    };
+    const previousHtml = editor.innerHTML;
+    const previousText = editor.innerText || editor.textContent || '';
+    const sanitizedHtml = sanitizeArticleHtml(html);
+    const expectedStyles = expectedLayoutStyles(sanitizedHtml);
+    const embeddedMatches = String(sanitizedHtml).match(/data:image\/(?:jpeg|png|gif|webp);base64,[^"']+/gi) || [];
+    const extractedEmbeddedPayloadBytes = embeddedMatches.reduce((total, value) => total + value.length, 0);
+    const expectedImageCount = Number(options.expectedImageCount || embeddedMatches.length || 0);
+    const forcedReplacement = options.forceEditorReplace !== false;
+    const failWithRollback = (code, result = {}, cause = null) => {
+      const rollbackConfirmed = restoreEditorSnapshot(editor, previousHtml);
+      throw Object.assign(new Error(code), {
+        cause,
+        result: {
+          injected: true,
+          rollbackPerformed: true,
+          rollbackConfirmed,
+          previousHtmlLength: previousHtml.length,
+          previousTextLength: previousText.trim().length,
+          previousTextHash: textHash(previousText.trim()),
+          ...editorDiagnostics,
+          ...result
+        }
+      });
+    };
+
+    await emitProgress(options, { phase: 'clearing-editor', percent: 6, message: '正在备份并清空原草稿' });
+    const clearResult = await clearEditorState(editor);
+    if (!clearResult.confirmed && !forcedReplacement) {
+      return failWithRollback('WECHAT_EDITOR_CLEAR_NOT_CONFIRMED', {
+        editorCleared: false,
+        clearMethod: clearResult.method,
+        clearConfirmed: false
+      });
+    }
+
+    let injectionMethod = '';
+    try {
+      await emitProgress(options, {
+        phase: 'inserting-content',
+        percent: 10,
+        message: `正在一次写入完整正文和 ${expectedImageCount} 张已压缩图片`
+      });
+      await wait(0);
+      injectionMethod = await pasteFullArticleOnce(editor, sanitizedHtml, forcedReplacement);
+      await wait(240);
+    } catch (error) {
+      return failWithRollback('WECHAT_INSERTION_FAILED', {
+        editorCleared: true,
+        clearMethod: clearResult.method,
+        clearConfirmed: clearResult.confirmed,
+        forcedReplacement
+      }, error);
+    }
+
+    let quoteDuplicateRemovalCount = removeDuplicateQuoteCopies(editor);
+    let quoteDecorationFixCount = normalizeQuoteDecorations(editor);
+    if (quoteDuplicateRemovalCount || quoteDecorationFixCount) await wait(80);
+    let styleInspection = inspectLayoutStyles(editor, expectedStyles);
+    await emitProgress(options, { phase: 'filling-metadata', percent: 14, message: '完整正文已写入，正在填写标题和摘要' });
+    const metadataResult = await fillArticleMetadata(editor, options);
+
+    const saveSelectors = options.saveSelectors || DEFAULT_SAVE_SELECTORS;
+    const imageStallTimeoutMs = Number(options.imageStallTimeoutMs || 15000);
+    const saveStallTimeoutMs = Number(options.saveStallTimeoutMs || 5000);
+    let imageInspection = inspectImages(editor);
+    let lastHostedCount = imageInspection.visibleHostedImageCount;
+    let lastImageProgressAt = Date.now();
+    let imagesConfirmedAt = null;
+    let saveText = '';
+    let saveTriggered = false;
+    let saveMethod = 'auto-status';
+    let saveControlCandidateCount = 0;
+    let waitStoppedReason = null;
+    let observedUnsavedState = false;
+    let lastProgressSignature = '';
+
+    while (Date.now() < deadlineAt) {
+      const currentSaveText = readSavedSignal(saveSelectors);
+      if (!currentSaveText) observedUnsavedState = true;
+      if (currentSaveText && (observedUnsavedState || Date.now() - startedAt > 1200)) saveText = currentSaveText;
+      imageInspection = inspectImages(editor);
+      const hostedCount = imageInspection.visibleHostedImageCount;
+      if (hostedCount > lastHostedCount) {
+        lastHostedCount = hostedCount;
+        lastImageProgressAt = Date.now();
+      }
+      const imagesConfirmed = expectedImageCount === 0 || (
+        imageInspection.imageCount >= expectedImageCount &&
+        imageInspection.visibleHostedImageCount >= expectedImageCount &&
+        imageInspection.pendingEmbeddedImageCount === 0
+      );
+      if (imagesConfirmed && imagesConfirmedAt == null) imagesConfirmedAt = Date.now();
+      const ratio = expectedImageCount ? Math.min(1, hostedCount / expectedImageCount) : 1;
+      const progress = imagesConfirmed
+        ? { phase: saveText ? 'validating-write' : 'waiting-save', percent: saveText ? 96 : 90, message: saveText ? '图片已托管，正在校验全文尾部' : '图片已全部托管，正在等待自动保存' }
+        : { phase: 'uploading-images', percent: 15 + Math.round(73 * ratio), message: `微信已托管 ${hostedCount} / ${expectedImageCount} 张图片` };
+      const signature = `${progress.phase}:${progress.percent}:${progress.message}`;
+      if (signature !== lastProgressSignature) {
+        lastProgressSignature = signature;
+        await emitProgress(options, progress);
+      }
+      if (imagesConfirmed && saveText) break;
+      if (!imagesConfirmed && Date.now() - lastImageProgressAt >= imageStallTimeoutMs) {
+        waitStoppedReason = 'image-hosting-stalled';
+        break;
+      }
+      if (imagesConfirmed && !saveText && imagesConfirmedAt && Date.now() - imagesConfirmedAt >= 1200 && options.clickSaveAsDraft !== false && !saveTriggered) {
+        const safeSave = findSafeDraftSaveControl();
+        saveControlCandidateCount = safeSave.candidateCount;
+        if (safeSave.control) {
+          safeSave.control.click();
+          saveTriggered = true;
+          saveMethod = 'exact-save-as-draft-button';
+        } else {
+          saveMethod = safeSave.candidateCount === 0 ? 'save-control-not-found' : 'save-control-ambiguous';
+        }
+      }
+      if (imagesConfirmed && !saveText && imagesConfirmedAt && Date.now() - imagesConfirmedAt >= saveStallTimeoutMs) {
+        waitStoppedReason = 'save-status-stalled';
+        break;
+      }
+      await wait(250);
+    }
+
+    quoteDuplicateRemovalCount += removeDuplicateQuoteCopies(editor);
+    quoteDecorationFixCount += normalizeQuoteDecorations(editor);
+    if (quoteDuplicateRemovalCount || quoteDecorationFixCount) await wait(80);
+    imageInspection = inspectImages(editor);
+    styleInspection = inspectLayoutStyles(editor, expectedStyles);
+    const validationScope = editor.closest('#ueditor_0') || editor;
+    const text = validationScope.innerText || validationScope.textContent || '';
+    const normalizedText = normalizeValidationText(text);
+    const expectedTextContains = options.expectedTextContains || '';
+    const expectedMinimumTextLength = Number(options.expectedMinimumTextLength || 0);
+    const forbiddenTextMarkers = options.forbiddenTextMarkers || [];
+    const visiblePageText = document.body.innerText || '';
+    const forbiddenTextFound = forbiddenTextMarkers.filter((marker) => marker && visiblePageText.includes(marker));
+    const baseValidation = validateReplacement({
+      actualText: text,
+      expectedTextContains,
+      forbiddenTextFound,
+      forcedReplacement,
+      styleInspection,
+      expectedImageCount
+    });
+    const minimumTextLengthConfirmed = expectedMinimumTextLength === 0 || normalizedText.length >= expectedMinimumTextLength;
+    const replacementConfirmed = baseValidation.replacementConfirmed && minimumTextLengthConfirmed;
+    const imageUploadConfirmed = expectedImageCount === 0 ? null : (
+      imageInspection.imageCount >= expectedImageCount &&
+      imageInspection.visibleHostedImageCount >= expectedImageCount &&
+      imageInspection.pendingEmbeddedImageCount === 0
+    );
+    const pendingImageOrders = imageInspection.pendingImageOrders || [];
+    const result = {
+      ok: Boolean(saveText) && replacementConfirmed && (!options.requireHostedImages || imageUploadConfirmed !== false),
+      injected: true,
+      injectionMethod: `${injectionMethod}+atomic-full-article`,
+      replacementConfirmed,
+      expectedTextFound: baseValidation.expectedTextFound,
+      minimumTextLengthConfirmed,
+      expectedMinimumTextLength,
+      strictReplacementConfirmed: baseValidation.strictReplacementConfirmed && minimumTextLengthConfirmed,
+      structuralContentConfirmed: baseValidation.structuralContentConfirmed,
+      replacementValidationBypassed: baseValidation.replacementValidationBypassed,
+      forbiddenTextFound,
+      saved: Boolean(saveText),
+      saveStatus: saveText || 'UNKNOWN',
+      saveTriggered,
+      saveMethod,
+      saveControlCandidateCount,
+      waitStoppedReason,
+      editorCleared: true,
+      clearMethod: forcedReplacement ? `${clearResult.method}+force-root-replacement` : clearResult.method,
+      clearConfirmed: clearResult.confirmed,
+      forcedReplacement,
+      styleValidationBypassed: forcedReplacement && !styleInspection.layoutStyleConfirmed,
+      styleRecoveryError: null,
+      quoteDecorationFixCount,
+      quoteDuplicateRemovalCount,
+      finalQuoteNormalizationApplied: quoteDecorationFixCount > 0 || quoteDuplicateRemovalCount > 0,
+      ...metadataResult,
+      rollbackPerformed: false,
+      rollbackConfirmed: null,
+      ...editorDiagnostics,
+      previousHtmlLength: previousHtml.length,
+      previousTextLength: previousText.trim().length,
+      previousTextHash: textHash(previousText.trim()),
+      paragraphCount: editor.querySelectorAll('[data-ifanr-block="paragraph"], p').length,
+      headingCount: editor.querySelectorAll('[data-ifanr-block="heading"], h1, h2, h3, h4, h5, h6').length,
+      imageCount: imageInspection.imageCount,
+      sourceImageCount: Number(options.sourceImageCount || expectedImageCount),
+      visibleImageCount: imageInspection.visibleImageCount,
+      visibleHostedImageCount: imageInspection.visibleHostedImageCount,
+      hostedImageCount: imageInspection.hostedImageCount,
+      imageSourceKinds: imageInspection.imageSourceKinds,
+      imageSourceDetails: imageInspection.imageSourceDetails,
+      pendingEmbeddedImageCount: imageInspection.pendingEmbeddedImageCount,
+      pendingImageOrders,
+      pendingImageNames: imageInspection.pendingImageNames || [],
+      pendingAnimatedImageCount: imageInspection.pendingAnimatedImageCount,
+      stagedImageCount: expectedImageCount,
+      stagedAnimatedImageCount: 0,
+      extractedEmbeddedImageCount: embeddedMatches.length,
+      extractedEmbeddedPayloadBytes,
+      initiallyHostedImageCount: 0,
+      confirmedStagedImageCount: imageInspection.visibleHostedImageCount,
+      imageUploadBatchSize: 0,
+      imageUploadBatchCount: expectedImageCount ? 1 : 0,
+      stagedImageUploadAttempts: [],
+      manualImagePlaceholderCount: Number(options.manualImageReplacements?.length || 0),
+      manualImageOrders: (options.manualImageReplacements || []).map((item) => item.order),
+      manualImageNames: (options.manualImageReplacements || []).map((item) => item.name),
+      hostingFallbackPlaceholderCount: 0,
+      hostingFallbackImageOrders: [],
+      animatedUploadAttempts: [],
+      imageUploadConfirmed,
+      imageWriteAccountedConfirmed: expectedImageCount === 0 || imageUploadConfirmed === true,
+      ...styleInspection,
+      textLength: text.trim().length,
+      textHash: textHash(text.trim())
+    };
+
+    if (!replacementConfirmed) return failWithRollback('WECHAT_REPLACEMENT_NOT_CONFIRMED', result);
+    if (options.requireHostedImages && imageUploadConfirmed !== true && expectedImageCount > 0) {
+      return failWithRollback('WECHAT_IMAGE_UPLOAD_NOT_CONFIRMED', result);
+    }
+    if (!result.saved) return failWithRollback('WECHAT_SAVE_NOT_CONFIRMED', result);
+    await emitProgress(options, { phase: 'write-completed', percent: 100, message: '全文、全部图片和自动保存均已确认' });
+    return result;
   }
 
   async function injectHtml(html, options = {}) {
+    return injectHtmlAtomic(html, options);
     const startedAt = Date.now();
     const timeoutMs = options.timeoutMs || 45000;
     const deadlineAt = startedAt + timeoutMs;
@@ -943,10 +1328,16 @@
       editorCandidates: editorSelection.candidates
     };
 
-    const sanitizedHtml = sanitizeArticleHtml(html);
+    // Keep multi-megabyte Base64 payloads out of the DOM parser. Only the
+    // lightweight article skeleton is sanitized and inserted; image payloads
+    // are materialized for the one bounded upload batch that needs them.
+    const embeddedPayloads = extractEmbeddedImagePayloads(html);
+    html = '';
+    const sanitizedTemplate = sanitizeArticleTemplate(embeddedPayloads.skeletonHtml);
+    embeddedPayloads.skeletonHtml = '';
     const previousHtml = editor.innerHTML;
     const previousText = editor.innerText || editor.textContent || '';
-    const staged = stageAllImages(sanitizedHtml, options.manualImageReplacements);
+    const staged = stageAllImages(sanitizedTemplate, options.manualImageReplacements, embeddedPayloads.sources);
     const expectedStyles = expectedLayoutStyles(staged.html);
     await emitProgress(options, {
       phase: 'clearing-editor',
@@ -1079,6 +1470,101 @@
     let saveMethod = 'auto-status';
     let saveControlCandidateCount = 0;
 
+    const expectedImageCount = Number(options.expectedImageCount || 0);
+    let imageInspection = inspectImages(editor);
+    const initiallyHostedImageCount = imageInspection.visibleHostedImageCount;
+    let lastProgressSignature = '';
+    const imageUploadAttempts = [];
+    const stagedImages = staged.stagedImages || [];
+
+    // The native Lark2Pad workflow prepares the whole rich-text payload before
+    // handing it to WeChat. Direct DOM injection needs an equivalent backpressure
+    // mechanism: keep only a few uploads in flight, confirm that batch, then
+    // advance. Bursting every data URI at once makes WeChat drop the tail.
+    const requestedBatchSize = Number(options.imageUploadBatchSize || DEFAULT_IMAGE_UPLOAD_BATCH_SIZE);
+    const imageUploadBatchSize = Math.max(1, Math.min(5, requestedBatchSize));
+    const imageBatchTimeoutMs = Number(options.imageBatchTimeoutMs || DEFAULT_IMAGE_BATCH_TIMEOUT_MS);
+    const imageBatchMaxEncodedBytes = Math.max(
+      1024 * 1024,
+      Number(options.imageBatchMaxEncodedBytes || DEFAULT_IMAGE_BATCH_MAX_ENCODED_BYTES)
+    );
+    let imageUploadBatchCount = 0;
+    for (let batchStart = 0; batchStart < stagedImages.length && Date.now() < deadlineAt;) {
+      const batch = [];
+      let batchEncodedBytes = 0;
+      while (batch.length < imageUploadBatchSize && batchStart + batch.length < stagedImages.length) {
+        const candidate = stagedImages[batchStart + batch.length];
+        const candidateBytes = candidate.source.length;
+        if (batch.length > 0 && batchEncodedBytes + candidateBytes > imageBatchMaxEncodedBytes) break;
+        batch.push(candidate);
+        batchEncodedBytes += candidateBytes;
+      }
+      imageUploadBatchCount += 1;
+      const batchAttempts = [];
+      for (const item of batch) {
+        const inserted = await insertStagedImage(editor, item);
+        const attempt = {
+          order: item.order,
+          mediaName: item.mediaName,
+          kind: item.kind,
+          isTitle: item.isTitle,
+          inserted: inserted.inserted,
+          insertionMethod: inserted.method,
+          positionRestored: inserted.positionRestored,
+          hostingPlaceholderRestored: false,
+          confirmed: false
+        };
+        Object.defineProperty(attempt, 'anchor', {
+          value: inserted.anchor,
+          enumerable: false,
+          writable: true,
+          configurable: true
+        });
+        imageUploadAttempts.push(attempt);
+        batchAttempts.push(attempt);
+      }
+
+      const needsBatchCommit = batchAttempts.some((attempt) => attempt.insertionMethod === 'batch-dom-materialization-fallback');
+      const batchCommitMethod = needsBatchCommit
+        ? forceReplaceEditorHtml(editor, editor.innerHTML)
+        : 'paste-handler-transaction';
+      for (const attempt of batchAttempts) {
+        attempt.insertionMethod = `${attempt.insertionMethod}+${batchCommitMethod}`;
+        const candidates = [...editor.querySelectorAll(`[data-ifanr-image-order="${attempt.order}"]`)];
+        attempt.anchor = candidates.find((node) => node.tagName !== 'IMG') || candidates[0] || null;
+      }
+      // The editor transaction now owns the temporary data URIs. Drop the
+      // extension's extra references so only the current batch remains hot.
+      for (const item of batch) item.source = '';
+      await wait(160);
+
+      const batchDeadlineAt = Math.min(deadlineAt, Date.now() + imageBatchTimeoutMs);
+      while (Date.now() < batchDeadlineAt) {
+        imageInspection = inspectImages(editor);
+        for (const attempt of batchAttempts) {
+          if (!attempt.confirmed) attempt.confirmed = imageUploadAttemptConfirmed(imageInspection, attempt);
+        }
+        if (batchAttempts.every((attempt) => attempt.confirmed)) break;
+        await wait(250);
+      }
+
+      const insertedCount = Math.min(batchStart + batch.length, stagedImages.length);
+      const confirmedCount = imageUploadAttempts.filter((attempt) => attempt.confirmed).length;
+      await emitProgress(options, {
+        phase: 'uploading-images',
+        percent: 18 + Math.round(70 * confirmedCount / Math.max(1, stagedImages.length)),
+        message: `已写入 ${insertedCount} / ${stagedImages.length} 张图片，微信已托管 ${confirmedCount} 张`
+      });
+      batchStart += batch.length;
+    }
+
+    quoteDuplicateRemovalCount += removeDuplicateQuoteCopies(editor);
+    quoteDecorationFixCount += normalizeQuoteDecorations(editor);
+    if (quoteDecorationFixCount > 0 || quoteDuplicateRemovalCount > 0) await wait(80);
+
+    // Saving before the upload queue drains can snapshot only the first few
+    // images. Observe or trigger save only after all batches have been handed
+    // to WeChat.
     const autoSaveStart = Date.now();
     let observedUnsavedState = false;
     while (Date.now() - autoSaveStart < 1500 && Date.now() < deadlineAt) {
@@ -1105,61 +1591,28 @@
       }
     }
 
-    const expectedImageCount = Number(options.expectedImageCount || 0);
-    let imageInspection = inspectImages(editor);
-    let lastProgressSignature = '';
-    const imageUploadAttempts = [];
-    const stagedImages = staged.stagedImages || [];
-
-    // Insert every image into the skeleton quickly. WeChat uploads pasted
-    // images concurrently, so the old per-image blocking wait was the main
-    // bottleneck. Each insert is still a single small DOM operation, which
-    // keeps the editor responsive.
-    for (let index = 0; index < stagedImages.length && Date.now() < deadlineAt; index += 1) {
-      const item = stagedImages[index];
-      const inserted = insertStagedImage(editor, item);
-      imageUploadAttempts.push({
-        order: item.order,
-        mediaName: item.mediaName,
-        kind: item.kind,
-        isTitle: item.isTitle,
-        inserted: inserted.inserted,
-        insertionMethod: inserted.method,
-        positionRestored: inserted.positionRestored,
-        hostingPlaceholderRestored: false,
-        confirmed: false
-      });
-      if (index % 4 === 3) await wait(100);
-      await emitProgress(options, {
-        phase: 'inserting-content',
-        percent: 18 + Math.round(12 * (index + 1) / Math.max(1, stagedImages.length)),
-        message: `已写入 ${Math.min(index + 1, stagedImages.length)} / ${stagedImages.length} 个图片位置，正在等待微信托管`
-      });
-    }
-
-    quoteDuplicateRemovalCount += removeDuplicateQuoteCopies(editor);
-    quoteDecorationFixCount += normalizeQuoteDecorations(editor);
-    if (quoteDecorationFixCount > 0 || quoteDuplicateRemovalCount > 0) await wait(80);
-
     const imageStallTimeoutMs = Number(options.imageStallTimeoutMs || DEFAULT_IMAGE_STALL_TIMEOUT_MS);
     const saveStallTimeoutMs = Number(options.saveStallTimeoutMs || DEFAULT_SAVE_STALL_TIMEOUT_MS);
-    let lastHostedCount = imageInspection.visibleHostedImageCount;
+    let lastHostedCount = imageUploadAttempts.filter((attempt) => attempt.confirmed).length;
     let lastImageProgressAt = Date.now();
-    let imagesConfirmedAt = expectedImageCount === 0 ? Date.now() : null;
+    let imagesConfirmedAt = stagedImages.length === 0 ? Date.now() : null;
     let waitStoppedReason = null;
     while (Date.now() < deadlineAt) {
       if (!saveText) saveText = readSavedSignal(saveSelectors);
       imageInspection = inspectImages(editor);
-      const visibleHosted = imageInspection.visibleHostedImageCount;
-      if (visibleHosted > lastHostedCount) {
-        lastHostedCount = visibleHosted;
+      for (const attempt of imageUploadAttempts) {
+        if (!attempt.confirmed) attempt.confirmed = imageUploadAttemptConfirmed(imageInspection, attempt);
+      }
+      const hostedStagedCount = imageUploadAttempts.filter((attempt) => attempt.confirmed).length;
+      if (hostedStagedCount > lastHostedCount) {
+        lastHostedCount = hostedStagedCount;
         lastImageProgressAt = Date.now();
       }
-      const imageRatio = expectedImageCount > 0
-        ? Math.min(1, visibleHosted / expectedImageCount)
+      const imageRatio = stagedImages.length > 0
+        ? Math.min(1, hostedStagedCount / stagedImages.length)
         : 1;
-      const imagesConfirmed = expectedImageCount === 0 || (
-        visibleHosted >= expectedImageCount &&
+      const imagesConfirmed = stagedImages.length === 0 || (
+        hostedStagedCount >= stagedImages.length &&
         imageInspection.pendingEmbeddedImageCount === 0
       );
       if (imagesConfirmed && imagesConfirmedAt == null) imagesConfirmedAt = Date.now();
@@ -1170,7 +1623,7 @@
         ? 18 + Math.round(imageRatio * 70)
         : saveText ? 96 : 90;
       const message = !imagesConfirmed
-        ? `微信已托管 ${visibleHosted} / ${expectedImageCount} 张图片${imageInspection.pendingEmbeddedImageCount ? `，还有 ${imageInspection.pendingEmbeddedImageCount} 张正在处理` : ''}`
+        ? `微信已托管 ${hostedStagedCount} / ${stagedImages.length} 张待上传图片${imageInspection.pendingEmbeddedImageCount ? `，还有 ${imageInspection.pendingEmbeddedImageCount} 张正在处理` : ''}`
         : saveText ? '图片已托管，正在完成最后检查' : '图片已托管，正在等待微信自动保存';
       const signature = `${phase}:${percent}:${message}`;
       if (signature !== lastProgressSignature) {
@@ -1237,16 +1690,17 @@
 
     styleInspection = inspectLayoutStyles(editor, expectedStyles);
 
-    const imageUploadConfirmed = expectedImageCount === 0
+    const confirmedStagedImageCount = imageUploadAttempts.filter((attempt) => attempt.confirmed).length;
+    const imageUploadConfirmed = stagedImages.length === 0 && expectedImageCount === 0
       ? null
-      : imageInspection.visibleHostedImageCount >= expectedImageCount &&
+      : confirmedStagedImageCount >= stagedImages.length &&
         imageInspection.pendingEmbeddedImageCount === 0;
     const hostingFallbackImageOrders = [...editor.querySelectorAll('[data-ifanr-image-hosting-placeholder]')]
       .map((node) => Number(node.dataset.ifanrImageOrder || 0))
       .filter((order) => order > 0);
     const hostingFallbackPlaceholderCount = hostingFallbackImageOrders.length;
-    const imageWriteAccountedConfirmed = expectedImageCount === 0 || (
-      imageInspection.visibleHostedImageCount + hostingFallbackPlaceholderCount >= expectedImageCount &&
+    const imageWriteAccountedConfirmed = stagedImages.length === 0 || (
+      confirmedStagedImageCount + hostingFallbackPlaceholderCount >= stagedImages.length &&
       imageInspection.pendingEmbeddedImageCount === 0
     );
     const validationScope = editor.closest('#ueditor_0') || editor;
@@ -1330,6 +1784,13 @@
       pendingAnimatedImageCount: Math.max(imageInspection.pendingAnimatedImageCount, failedAnimatedAttempts.length),
       stagedImageCount: stagedImages.length,
       stagedAnimatedImageCount: staged.animatedImages.length,
+      extractedEmbeddedImageCount: embeddedPayloads.count,
+      extractedEmbeddedPayloadBytes: embeddedPayloads.bytes,
+      initiallyHostedImageCount,
+      confirmedStagedImageCount,
+      imageUploadBatchSize,
+      imageUploadBatchCount,
+      imageBatchMaxEncodedBytes,
       stagedImageUploadAttempts: imageUploadAttempts,
       manualImagePlaceholderCount: staged.manualImageReplacements.length,
       manualImageOrders: staged.manualImageReplacements.map((item) => item.order),

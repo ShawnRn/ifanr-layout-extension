@@ -312,6 +312,42 @@
     .status-summary strong { font-weight: 600; }
     .status-summary span { color: var(--muted); }
 
+    .injection-progress {
+      margin-bottom: 9px;
+      padding: 10px 12px;
+      border: 1px solid #CBE4D6;
+      border-radius: 10px;
+      background: var(--success-bg);
+    }
+    .injection-progress[data-state="failed"] { border-color: #F0C9C4; background: var(--danger-bg); }
+    .injection-progress[data-state="completed"] { border-color: #A9D8BC; background: #E7F6ED; }
+    .injection-progress-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 7px;
+      font-size: 11px;
+    }
+    .injection-progress-head strong { font-weight: 600; }
+    .injection-progress-head span { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .injection-progress-track {
+      height: 7px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(7, 193, 96, .14);
+    }
+    .injection-progress[data-state="failed"] .injection-progress-track { background: rgba(180, 58, 50, .12); }
+    .injection-progress-bar {
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: #07C160;
+      transition: width .2s ease;
+    }
+    .injection-progress[data-state="failed"] .injection-progress-bar { background: var(--danger); }
+    .injection-progress-message { margin: 6px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+
     .source-card h2 { margin: 0; font-size: 13px; line-height: 1.4; font-weight: 600; }
     .source-meta { margin: 4px 0 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 
@@ -421,6 +457,17 @@
       <span id="status-msg">点击左上方直接读取转换当前文档</span>
     </div>
 
+    <section id="injection-progress" class="injection-progress" data-state="processing" hidden>
+      <div class="injection-progress-head">
+        <strong id="injection-progress-title">正在注入公众号</strong>
+        <span id="injection-progress-percent">0%</span>
+      </div>
+      <div class="injection-progress-track" role="progressbar" aria-label="公众号注入进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="injection-progress-bar" class="injection-progress-bar"></div>
+      </div>
+      <p id="injection-progress-message" class="injection-progress-message">正在准备公众号编辑器</p>
+    </section>
+
     <section class="card source-card">
       <h2 id="source-title">尚未选择文档</h2>
       <p id="source-meta" class="source-meta">在飞书文档页打开，或点击“从剪贴板读取”</p>
@@ -444,6 +491,8 @@
   <script src="lib/turndown-plugin-gfm.js"></script>
   <script src="lib/turndown-wrapper.js"></script>
   <script src="source-link.js"></script>
+  <script src="static-image-compression.js"></script>
+  <script src="lark-image-processor.js"></script>
   <script src="lark2pad-converter.js"></script>
   <script src="popup.js"></script>
 </body>

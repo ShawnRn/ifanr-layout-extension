@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Feishu export bridge smoke test</title>
+</head>
+<body>
+  <pre id="output">RUNNING</pre>
+  <script src="../extension/feishu-export-bridge.js"></script>
+  <script>
+    const requestId = 'bridge-smoke';
+    window.addEventListener('message', async (event) => {
+      const data = event.data;
+      if (data?.source !== 'ifanr-feishu-export-bridge' || data.requestId !== requestId) return;
+      if (data.type === 'ready') {
+        const anchor = document.createElement('a');
+        anchor.download = 'article.zip';
+        anchor.href = URL.createObjectURL(new Blob(['complete-markdown-payload'], { type: 'application/zip' }));
+        anchor.click();
+      }
+      if (data.type === 'payload') {
+        const text = new TextDecoder().decode(data.buffer);
+        const pass = data.filename === 'article.zip' && data.mime === 'application/zip' && text === 'complete-markdown-payload';
+        document.querySelector('#output').textContent = JSON.stringify({ pass, filename: data.filename, mime: data.mime, text });
+        document.title = pass ? 'PASS' : 'FAIL';
+      }
+    });
+    window.postMessage({ source: 'ifanr-feishu-export-control', type: 'start', requestId }, '*');
+    setTimeout(() => {
+      if (document.title.includes('smoke test')) document.title = 'FAIL';
+    }, 3000);
+  </script>
+</body>
+</html>

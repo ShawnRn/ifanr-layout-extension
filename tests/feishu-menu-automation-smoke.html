@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Feishu menu automation smoke test</title>
+</head>
+<body>
+  <button class="more-btn" type="button">更多</button>
+  <pre id="output">RUNNING</pre>
+  <script>
+    window.chrome = {
+      runtime: {
+        onMessage: { addListener() {} },
+        sendMessage: async () => ({ ok: true })
+      },
+      storage: { local: { set: async () => {} } }
+    };
+
+    const more = document.querySelector('.more-btn');
+    more.addEventListener('click', () => {
+      if (document.querySelector('[data-test="download-as"]')) return;
+      const menu = document.createElement('div');
+      menu.setAttribute('role', 'menu');
+      const download = document.createElement('div');
+      download.dataset.test = 'download-as';
+      download.setAttribute('role', 'menuitem');
+      download.innerHTML = '<span>下载为</span>';
+      const openFormats = () => {
+        if (document.querySelector('[data-test="markdown"]')) return;
+        const formats = document.createElement('div');
+        formats.setAttribute('role', 'menu');
+        const markdown = document.createElement('div');
+        markdown.dataset.test = 'markdown';
+        markdown.setAttribute('role', 'menuitem');
+        markdown.innerHTML = '<span>Markdown</span>';
+        markdown.addEventListener('click', () => {
+          const dialog = document.createElement('div');
+          dialog.setAttribute('role', 'dialog');
+          dialog.innerHTML = `
+            <div>导出 Markdown 设置</div>
+            <div role="radio" aria-checked="true"><span>仅文本（不含图片和附件）</span></div>
+            <div role="radio" aria-checked="false"><span>所有内容</span></div>
+            <button type="button"><span>导出</span></button>`;
+          dialog.querySelector('button').addEventListener('click', () => {
+            dialog.dataset.exported = 'true';
+          });
+          document.body.append(dialog);
+        });
+        formats.append(markdown);
+        document.body.append(formats);
+      };
+      download.addEventListener('mouseover', openFormats);
+      download.addEventListener('click', openFormats);
+      menu.append(download);
+      document.body.append(menu);
+    });
+  </script>
+  <script src="../extension/feishu-content-script.js"></script>
+  <script>
+    (async () => {
+      let unhandled = false;
+      window.addEventListener('unhandledrejection', () => { unhandled = true; });
+      await automateFeishuMarkdownExport();
+      const bridge = beginSilentExportBridge('cancel-smoke');
+      bridge.cancel('EXPECTED_CANCEL');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const dialog = document.querySelector('[role="dialog"]');
+      const pass = dialog?.dataset.exported === 'true' && unhandled === false;
+      document.querySelector('#output').textContent = JSON.stringify({
+        pass,
+        exported: dialog?.dataset.exported === 'true',
+        unhandled
+      });
+      document.title = pass ? 'PASS' : 'FAIL';
+    })().catch((error) => {
+      document.querySelector('#output').textContent = JSON.stringify({ pass: false, error: error.message });
+      document.title = 'FAIL';
+    });
+  </script>
+</body>
+</html>

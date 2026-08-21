@@ -2,10 +2,13 @@
   const DEFAULT_MAX_WIDTH = 1280;
   const ROUND_CORNER_RATIO = 0.02;
   const WECHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
-  const SAFE_TARGET_BYTES = Math.floor(4.72 * 1024 * 1024);
+  // Keep the complete rich-text transaction small enough for WeChat's editor.
+  // A per-image limit close to 5 MB is technically accepted, but a 20-image
+  // article at that size can freeze Chrome or make WeChat drop the tail.
+  const SAFE_TARGET_BYTES = Math.floor(1.25 * 1024 * 1024);
   const SKIP_SMALL_BYTES = 512 * 1024;
   const MAX_DECODED_PIXELS = 60 * 1000 * 1000;
-  const OUTPUT_QUALITY = [0.6, 0.68, 0.76, 0.85, 0.92];
+  const OUTPUT_QUALITY = [0.58, 0.64, 0.7, 0.78, 0.86];
 
   function clampQuality(value) {
     const numeric = Number(value);
@@ -101,6 +104,8 @@
     const scale = Math.min(1, maxWidth / rawWidth);
     const width = Math.max(1, Math.round(rawWidth * scale));
     const height = Math.max(1, Math.round(rawHeight * scale));
+    // Match Lark2Pad: rounded static images must keep transparent corners, so
+    // they are encoded as PNG. Plain static images use JPEG for payload size.
     const outputMime = roundImages ? 'image/png' : 'image/jpeg';
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -110,6 +115,7 @@
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = 'high';
     if (roundImages) {
+      context.clearRect(0, 0, width, height);
       const radius = Math.max(1, Math.round(width * ROUND_CORNER_RATIO));
       traceContinuousRoundRect(context, 0, 0, width, height, radius);
       context.clip();
@@ -122,10 +128,42 @@
   }
 
   async function encodeWithinLimit(canvas, mime, quality, deadlineAt) {
+    if (mime === 'image/png') {
+      let currentCanvas = canvas;
+      let latestBlob = await canvasToBlob(currentCanvas, mime);
+      // PNG has no useful quality knob. Keep its transparent rounded corners
+      // and reduce only pixel dimensions when the atomic article payload would
+      // otherwise become too large. Never shrink below a readable 480 px.
+      while (latestBlob.size > SAFE_TARGET_BYTES && currentCanvas.width > 480) {
+        if (Number(deadlineAt) > 0 && Date.now() >= Number(deadlineAt)) break;
+        const sizeScale = Math.sqrt(SAFE_TARGET_BYTES / Math.max(1, latestBlob.size));
+        const scale = Math.max(0.72, Math.min(0.9, sizeScale * 0.96));
+        const nextWidth = Math.max(480, Math.round(currentCanvas.width * scale));
+        const nextHeight = Math.max(1, Math.round(currentCanvas.height * (nextWidth / currentCanvas.width)));
+        if (nextWidth >= currentCanvas.width) break;
+        const nextCanvas = document.createElement('canvas');
+        nextCanvas.width = nextWidth;
+        nextCanvas.height = nextHeight;
+        const nextContext = nextCanvas.getContext('2d', { alpha: true });
+        if (!nextContext) break;
+        nextContext.imageSmoothingEnabled = true;
+        nextContext.imageSmoothingQuality = 'high';
+        nextContext.clearRect(0, 0, nextWidth, nextHeight);
+        nextContext.drawImage(currentCanvas, 0, 0, nextWidth, nextHeight);
+        currentCanvas = nextCanvas;
+        latestBlob = await canvasToBlob(currentCanvas, mime);
+      }
+      return {
+        blob: latestBlob,
+        encodeQuality: null,
+        width: currentCanvas.width,
+        height: currentCanvas.height
+      };
+    }
     let currentQuality = clampQuality(quality);
     let latestBlob = await canvasToBlob(canvas, mime, currentQuality);
     if (latestBlob.size <= SAFE_TARGET_BYTES) {
-      return { blob: latestBlob, encodeQuality: currentQuality };
+      return { blob: latestBlob, encodeQuality: currentQuality, width: canvas.width, height: canvas.height };
     }
     for (const candidate of OUTPUT_QUALITY.filter((value) => value < currentQuality).sort((a, b) => b - a)) {
       if (Number(deadlineAt) > 0 && Date.now() >= Number(deadlineAt)) break;
@@ -133,7 +171,7 @@
       latestBlob = await canvasToBlob(canvas, mime, currentQuality);
       if (latestBlob.size <= SAFE_TARGET_BYTES) break;
     }
-    return { blob: latestBlob, encodeQuality: currentQuality };
+    return { blob: latestBlob, encodeQuality: currentQuality, width: canvas.width, height: canvas.height };
   }
 
   function maybeSkipOriginal({ blob, mime, roundImages, maxWidth, width, height }) {
@@ -182,14 +220,14 @@
         ...base,
         blob: encoded.blob,
         mime: rendered.outputMime,
-        width: rendered.width,
-        height: rendered.height,
+        width: encoded.width || rendered.width,
+        height: encoded.height || rendered.height,
         originalWidth,
         originalHeight,
         outputBytes: Number(encoded.blob.size || 0),
         encodeQuality: encoded.encodeQuality,
         roundImages,
-        maxWidth: rendered.width,
+        maxWidth: encoded.width || rendered.width,
         processed: true,
         decision: roundImages ? 'lark-processed-round' : 'lark-processed-plain'
       };

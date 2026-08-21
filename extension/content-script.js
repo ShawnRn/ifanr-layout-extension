@@ -130,6 +130,8 @@ function showPageToast(status) {
   }
   toast.querySelector('[data-role="title"]').textContent = description.title;
   toast.querySelector('[data-role="copy"]').textContent = description.message;
+  const progressTrack = toast.querySelector('[data-role="progress-track"]');
+  if (progressTrack) progressTrack.hidden = true;
   toast.style.borderLeftColor = description.tone === 'success'
     ? '#287A50'
     : description.tone === 'warning' ? '#9A5A14' : '#FD4606';
@@ -141,6 +143,55 @@ function showPageToast(status) {
   toastTimer = setTimeout(() => {
     hidePageToast();
   }, 4200);
+}
+
+function showPageWriteProgress(progress = {}) {
+  let toast = document.querySelector('#ifanr-layout-page-toast');
+  if (!toast) {
+    showPageToast({ type: 'syncing' });
+    toast = document.querySelector('#ifanr-layout-page-toast');
+  }
+  if (!toast) return;
+
+  let progressTrack = toast.querySelector('[data-role="progress-track"]');
+  if (!progressTrack) {
+    progressTrack = document.createElement('div');
+    progressTrack.dataset.role = 'progress-track';
+    progressTrack.setAttribute('role', 'progressbar');
+    progressTrack.setAttribute('aria-valuemin', '0');
+    progressTrack.setAttribute('aria-valuemax', '100');
+    Object.assign(progressTrack.style, {
+      height: '6px',
+      marginTop: '9px',
+      overflow: 'hidden',
+      borderRadius: '999px',
+      background: 'rgba(7,193,96,.15)'
+    });
+    const bar = document.createElement('div');
+    bar.dataset.role = 'progress-bar';
+    Object.assign(bar.style, {
+      width: '0%',
+      height: '100%',
+      borderRadius: 'inherit',
+      background: '#07C160',
+      transition: 'width .2s ease'
+    });
+    progressTrack.append(bar);
+    toast.append(progressTrack);
+  }
+
+  const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)));
+  toast.querySelector('[data-role="title"]').textContent = `正在注入公众号·${percent}%`;
+  toast.querySelector('[data-role="copy"]').textContent = progress.message || '正在处理正文和图片';
+  progressTrack.hidden = false;
+  progressTrack.setAttribute('aria-valuenow', String(percent));
+  progressTrack.querySelector('[data-role="progress-bar"]').style.width = `${percent}%`;
+  toast.style.borderLeftColor = '#07C160';
+  toast.style.visibility = 'visible';
+  toast.style.pointerEvents = 'auto';
+  toast.style.opacity = '1';
+  toast.style.transform = 'translateY(0)';
+  clearTimeout(toastTimer);
 }
 
 async function announcePageStatus(type, detail = {}) {
@@ -225,7 +276,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   };
   let lastProgressSignature = '';
   const resolveArticleHtml = async () => {
-    if (message.html) return message.html;
+    if (message.html) {
+      const html = message.html;
+      // Avoid retaining a second full Base64-rich article while the adapter
+      // streams its image batches into the editor.
+      message.html = '';
+      return html;
+    }
     if (message.type === 'IFANR_INJECT_HTML') return message.html;
     const stored = await chrome.storage.local.get([IFANR_ARTICLE_PACKAGE_KEY, 'ifanrLark2PadCache']);
     const articlePackage = stored[IFANR_ARTICLE_PACKAGE_KEY] || stored['ifanrLark2PadCache'];
@@ -237,6 +294,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const signature = `${progress.phase}:${progress.percent}:${progress.message}`;
     if (signature === lastProgressSignature) return;
     lastProgressSignature = signature;
+    showPageWriteProgress(progress);
     await recordWriteStatus({
       ...baseStatus,
       state: 'processing',

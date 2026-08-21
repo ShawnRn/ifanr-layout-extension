@@ -8,7 +8,7 @@ const COMPILE_CANCEL_URL = `${SERVICE_ORIGIN}/compile/cancel`;
 const HEALTH_URL = `${SERVICE_ORIGIN}/health`;
 const PROTOCOL_VERSION = 4;
 const REQUIRED_SERVICE_VERSION = '1.11.0';
-const CLIENT_COMPILE_TIMEOUT_MS = 45000;
+const CLIENT_COMPILE_TIMEOUT_MS = 120000;
 const PACKAGE_KEY = 'ifanrArticlePackage';
 const STATUS_KEY = 'ifanrCompileStatus';
 const STAGING_KEY_PREFIX = 'ifanrArticlePackageStaging:';
@@ -356,7 +356,7 @@ async function compileSource(source) {
           await cancelCompileJob(jobId).catch(() => null);
           throw {
             code: 'COMPILE_TIMEOUT',
-            message: '生成排版内容超过 45 秒，已自动停止。',
+            message: '生成排版内容超过 120 秒，已自动停止。',
             phase: job.progress?.phase,
             progressMessage: job.progress?.message,
             imageIndex: job.progress?.imageIndex || 0,

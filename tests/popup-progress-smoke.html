@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Popup progress smoke test</title>
+</head>
+<body>
+  <button id="main-inject-btn"><span id="inject-btn-text">一键注入</span></button>
+  <span id="status-tag">待机</span>
+  <span id="status-msg">等待操作</span>
+  <span id="source-title"></span>
+  <span id="source-meta"></span>
+  <span id="metric-blocks"></span>
+  <span id="metric-images"></span>
+  <span id="metric-brand"></span>
+  <span id="service-indicator"></span>
+  <section id="package-card" hidden></section>
+  <section id="result-card" hidden>
+    <span id="result-title"></span>
+    <span id="result-copy"></span>
+  </section>
+  <span id="toast-msg"></span>
+  <section id="injection-progress" data-state="processing" hidden>
+    <strong id="injection-progress-title"></strong>
+    <span id="injection-progress-percent">0%</span>
+    <div role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div id="injection-progress-bar"></div>
+    </div>
+    <p id="injection-progress-message"></p>
+  </section>
+  <pre id="output">RUNNING</pre>
+
+  <script>
+    const storageListeners = [];
+    const cachedPackage = {
+      wechatHtml: '<section><p>Progress test</p></section>',
+      markdown: 'Progress test',
+      title: 'Progress test',
+      sourceUrl: 'https://example.com/source',
+      imageCount: 15,
+      blockCount: 1,
+      brand: 'ifanr'
+    };
+
+    window.chrome = {
+      storage: {
+        local: {
+          get: async () => ({ ifanrLark2PadCache: cachedPackage }),
+          set: async () => {},
+          remove: async () => {}
+        },
+        onChanged: {
+          addListener(listener) {
+            storageListeners.push(listener);
+          }
+        }
+      },
+      tabs: {
+        query: async (query) => query.active
+          ? [{ id: 7, url: 'https://mp.weixin.qq.com/cgi-bin/appmsg' }]
+          : [],
+        sendMessage: async (_tabId, message) => {
+          const publishProgress = (percent, text) => {
+            for (const listener of storageListeners) {
+              listener({
+                ifanrWechatWriteStatus: {
+                  newValue: {
+                    requestId: message.requestId,
+                    state: 'processing',
+                    progress: { percent, message: text }
+                  }
+                }
+              }, 'local');
+            }
+          };
+          publishProgress(35, '已提交 5 / 15 张图片');
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          publishProgress(82, '微信已托管 12 / 15 张图片');
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return {
+            ok: true,
+            result: {
+              stagedImageCount: 15,
+              confirmedStagedImageCount: 15,
+              imageUploadConfirmed: true,
+              saved: true
+            }
+          };
+        }
+      },
+      action: {
+        setBadgeText() {},
+        setIcon() {}
+      },
+      scripting: {
+        executeScript: async () => []
+      }
+    };
+  </script>
+  <script src="../extension/popup.js"></script>
+  <script>
+    setTimeout(() => {
+      document.querySelector('#main-inject-btn').click();
+    }, 80);
+
+    setTimeout(() => {
+      const progress = document.querySelector('#injection-progress');
+      const percent = document.querySelector('#injection-progress-percent').textContent;
+      const width = document.querySelector('#injection-progress-bar').style.width;
+      const ariaNow = progress.querySelector('[role="progressbar"]').getAttribute('aria-valuenow');
+      const buttonEnabled = !document.querySelector('#main-inject-btn').disabled;
+      const pass = !progress.hidden &&
+        progress.dataset.state === 'completed' &&
+        percent === '100%' &&
+        width === '100%' &&
+        ariaNow === '100' &&
+        buttonEnabled;
+      document.querySelector('#output').textContent = JSON.stringify({
+        pass,
+        state: progress.dataset.state,
+        percent,
+        width,
+        ariaNow,
+        buttonEnabled,
+        message: document.querySelector('#injection-progress-message').textContent
+      });
+      document.title = pass ? 'PASS' : 'FAIL';
+    }, 300);
+  </script>
+</body>
+</html>

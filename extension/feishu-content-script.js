@@ -1,5 +1,5 @@
 const IFANR_STAGING_KEY_PREFIX = 'ifanrArticlePackageStaging:';
-const IFANR_BROWSER_CAPTURE_TIMEOUT_MS = 45000;
+const IFANR_BROWSER_CAPTURE_TIMEOUT_MS = 120000;
 const IFANR_IMAGE_DOWNLOAD_TIMEOUT_MS = 10000;
 const IFANR_IMAGE_DOWNLOAD_CONCURRENCY = 6;
 const IFANR_MAX_IMAGE_BYTES = 80 * 1024 * 1024;
@@ -224,6 +224,35 @@ function capturedBlocksSignature(blocksById) {
     .join('|');
 }
 
+function visibleFeishuBlocksSignature() {
+  return [...document.querySelectorAll('[data-block-id]')]
+    .filter((element) => !element.closest(FEISHU_HEADER_CONTAINER_SELECTOR))
+    .map((element) => {
+      const id = element.getAttribute('data-block-id') || '';
+      const type = element.getAttribute('data-block-type') || '';
+      const textLength = String(element.textContent || '').replace(/\s+/g, '').length;
+      const image = element.querySelector('img');
+      return `${id}:${type}:${textLength}:${image?.currentSrc || image?.src || ''}`;
+    })
+    .sort()
+    .join('|');
+}
+
+async function settleAndScanFeishuViewport(container, blocksById, sequence, isCancelled) {
+  let previousVisibleSignature = '';
+  let stableFrameCount = 0;
+  for (let frame = 0; frame < 8; frame += 1) {
+    if (isCancelled?.()) throw { code: 'COMPILE_CANCELLED', message: '任务已经停止。' };
+    await feishuDelay(frame === 0 ? 120 : 70);
+    scanVisibleFeishuBlocks(blocksById, sequence);
+    const signature = visibleFeishuBlocksSignature();
+    if (signature && signature === previousVisibleSignature) stableFrameCount += 1;
+    else stableFrameCount = 0;
+    previousVisibleSignature = signature;
+    if (stableFrameCount >= 2) break;
+  }
+}
+
 async function collectFeishuBlocks(onProgress, isCancelled) {
   const container = feishuScrollContainer();
   if (!container) throw { code: 'FEISHU_DOCUMENT_NOT_READY', message: '没有找到飞书正文滚动区域，请等待文档加载完成后重试。' };
@@ -234,31 +263,41 @@ async function collectFeishuBlocks(onProgress, isCancelled) {
   let passCount = 0;
   let stable = false;
   try {
-    const step = Math.max(180, Math.floor(container.clientHeight * 0.5));
+    const step = Math.max(220, Math.floor(container.clientHeight * 0.62));
     let previousSignature = '';
     let previousHeight = 0;
     for (let pass = 1; pass <= 4; pass += 1) {
       passCount = pass;
       let maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-      const positions = [];
-      for (let position = 0; position < maxScroll; position += step) positions.push(position);
-      positions.push(maxScroll);
-      if (pass % 2 === 0) positions.reverse();
-      for (let index = 0; index < positions.length; index += 1) {
+      let position = pass % 2 === 0 ? maxScroll : 0;
+      let viewportIndex = 0;
+      while (true) {
         if (isCancelled?.()) throw { code: 'COMPILE_CANCELLED', message: '任务已经停止。' };
         maxScroll = Math.max(maxScroll, container.scrollHeight - container.clientHeight);
-        container.scrollTop = Math.min(positions[index], maxScroll);
+        const target = Math.max(0, Math.min(position, maxScroll));
+        container.scrollTop = target;
         container.dispatchEvent(new Event('scroll', { bubbles: true }));
-        await feishuDelay(90);
-        scanVisibleFeishuBlocks(blocksById, sequence);
+        await settleAndScanFeishuViewport(container, blocksById, sequence, isCancelled);
         visited += 1;
-        const passProgress = (index + 1) / Math.max(1, positions.length);
+        viewportIndex += 1;
+        const passProgress = maxScroll > 0
+          ? (pass % 2 === 0 ? 1 - target / maxScroll : target / maxScroll)
+          : 1;
         const percent = Math.min(52, 5 + Math.round(47 * ((pass - 1 + passProgress) / 4)));
         await onProgress?.({
           phase: 'browser-reading',
           percent,
           message: `正在核对全文（第 ${pass} 轮），已发现 ${blocksById.size} 个内容块`
         });
+
+        const reachedEnd = pass % 2 === 0 ? target <= 0 : target >= maxScroll;
+        if (reachedEnd) break;
+        position = pass % 2 === 0
+          ? Math.max(0, target - step)
+          : Math.min(maxScroll, target + step);
+        if (viewportIndex > 600) {
+          throw { code: 'FEISHU_DOCUMENT_UNSTABLE', message: '飞书滚动区域无法完成全文遍历。' };
+        }
       }
       const signature = capturedBlocksSignature(blocksById);
       const height = container.scrollHeight;
@@ -282,8 +321,9 @@ async function collectFeishuBlocks(onProgress, isCancelled) {
     };
   }
   const blocks = [...blocksById.values()].sort((a, b) => {
-    const byOrder = Number(a.order || 0) - Number(b.order || 0);
-    return byOrder || Number(a.captureSequence || 0) - Number(b.captureSequence || 0);
+    const byTop = Number(a.top || 0) - Number(b.top || 0);
+    if (Math.abs(byTop) > 2) return byTop;
+    return Number(a.captureSequence || 0) - Number(b.captureSequence || 0);
   });
   if (!blocks.some((block) => block.text)) {
     throw { code: 'FEISHU_DOCUMENT_EMPTY', message: '没有从当前飞书页面读取到正文，请确认文档已经加载且你有查看权限。' };
@@ -399,7 +439,7 @@ async function attachFeishuImages(blocks, onProgress, isCancelled, deadlineAt, o
       if (Date.now() >= deadlineAt) {
         throw {
           code: 'COMPILE_TIMEOUT',
-          message: '通过当前飞书页面读取超过 45 秒，已自动停止。',
+          message: '通过当前飞书页面读取超过 120 秒，已自动停止。',
           phase: 'browser-images',
           imageIndex: index + 1,
           imageCount: images.length
@@ -555,6 +595,259 @@ async function attachFeishuImages(blocks, onProgress, isCancelled, deadlineAt, o
 
 let activeFeishuCapture = null;
 
+const IFANR_EXPORT_BRIDGE_SOURCE = 'ifanr-feishu-export-bridge';
+
+function waitForFeishuElement(find, timeoutMs = 12000, phase = 'CONTROL') {
+  const startedAt = Date.now();
+  return new Promise((resolve, reject) => {
+    const inspect = () => {
+      const value = find();
+      if (value) return resolve(value);
+      if (Date.now() - startedAt >= timeoutMs) return reject(new Error(`FEISHU_EXPORT_${phase}_NOT_FOUND`));
+      setTimeout(inspect, 80);
+    };
+    inspect();
+  });
+}
+
+function exactTextElement(text, root = document) {
+  const wanted = String(text || '').replace(/\s+/g, ' ').trim();
+  const interactiveSelector = 'button,[role="button"],[role="menuitem"],[role="radio"],label';
+  const candidates = [...root.querySelectorAll(`${interactiveSelector},div,span`)]
+    .filter((node) => String(node.textContent || '').replace(/\s+/g, ' ').trim() === wanted)
+    .map((node) => node.matches?.(interactiveSelector) ? node : (node.closest?.(interactiveSelector) || node));
+  return [...new Set(candidates)].sort((a, b) => {
+    const aInteractive = a.matches?.(interactiveSelector) ? 0 : 1;
+    const bInteractive = b.matches?.(interactiveSelector) ? 0 : 1;
+    return aInteractive - bInteractive || a.children.length - b.children.length;
+  })[0] || null;
+}
+
+function activateFeishuControl(control, hoverOnly = false) {
+  if (!control) return false;
+  const actionable = control.closest?.('button,[role="button"],[role="menuitem"],[role="radio"],label') || control;
+  const options = { bubbles: true, cancelable: true, composed: true, view: window };
+  if (typeof PointerEvent === 'function') {
+    actionable.dispatchEvent(new PointerEvent('pointerover', options));
+    actionable.dispatchEvent(new PointerEvent('pointerenter', options));
+    actionable.dispatchEvent(new PointerEvent('pointermove', options));
+  }
+  actionable.dispatchEvent(new MouseEvent('mouseover', options));
+  actionable.dispatchEvent(new MouseEvent('mouseenter', options));
+  actionable.dispatchEvent(new MouseEvent('mousemove', options));
+  if (hoverOnly) return true;
+  actionable.focus?.({ preventScroll: true });
+  if (typeof PointerEvent === 'function') actionable.dispatchEvent(new PointerEvent('pointerdown', options));
+  actionable.dispatchEvent(new MouseEvent('mousedown', options));
+  if (typeof PointerEvent === 'function') actionable.dispatchEvent(new PointerEvent('pointerup', options));
+  actionable.dispatchEvent(new MouseEvent('mouseup', options));
+  actionable.click();
+  return true;
+}
+
+function beginSilentExportBridge(requestId) {
+  let cancel = () => {};
+  const promise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => finish(new Error('FEISHU_MARKDOWN_EXPORT_TIMEOUT')), 60000);
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      window.removeEventListener('message', onMessage);
+      window.postMessage({ source: 'ifanr-feishu-export-control', type: 'cancel', requestId }, '*');
+      if (error) reject(error);
+      else resolve(value);
+    };
+    cancel = (reason = 'FEISHU_MARKDOWN_EXPORT_CANCELLED') => finish(new Error(reason));
+    const onMessage = async (event) => {
+      const data = event.data;
+      if (event.source !== window || data?.source !== IFANR_EXPORT_BRIDGE_SOURCE || data.requestId !== requestId) return;
+      if (data.type === 'error') return finish(new Error(data.error || 'FEISHU_MARKDOWN_EXPORT_FAILED'));
+      if (data.type === 'download-url') {
+        try {
+          const response = await fetch(data.url, { credentials: 'include' });
+          if (!response.ok) throw new Error(`FEISHU_EXPORT_DOWNLOAD_${response.status}`);
+          return finish(null, { buffer: await response.arrayBuffer(), filename: data.filename || '', mime: response.headers.get('content-type') || '' });
+        } catch (error) {
+          return finish(error);
+        }
+      }
+      if (data.type === 'payload' && data.buffer instanceof ArrayBuffer) {
+        return finish(null, { buffer: data.buffer, filename: data.filename || '', mime: data.mime || '' });
+      }
+    };
+    window.addEventListener('message', onMessage);
+    window.postMessage({ source: 'ifanr-feishu-export-control', type: 'start', requestId }, '*');
+  });
+  // The menu automation can fail before the caller starts awaiting the bridge.
+  // Attach a handler immediately so cancellation never becomes an unhandled
+  // rejection in Chrome's extension error page.
+  promise.catch(() => {});
+  return { promise, cancel };
+}
+
+async function automateFeishuMarkdownExport() {
+  const conceal = document.createElement('style');
+  conceal.dataset.ifanrSilentExport = 'true';
+  conceal.textContent = '.docx-export-panel,[role="menu"]{opacity:0!important;transition:none!important;}';
+  document.documentElement.append(conceal);
+  try {
+    const more = await waitForFeishuElement(
+      () => document.querySelector('button.more-btn') || document.querySelector('[data-testid*="more-menu"]'),
+      20000,
+      'MORE_BUTTON'
+    );
+    activateFeishuControl(more);
+    const downloadAs = await waitForFeishuElement(() => exactTextElement('下载为'), 12000, 'DOWNLOAD_AS');
+    activateFeishuControl(downloadAs, true);
+    let markdown = null;
+    try {
+      markdown = await waitForFeishuElement(() => exactTextElement('Markdown'), 1200, 'MARKDOWN_MENU');
+    } catch {
+      activateFeishuControl(downloadAs);
+      markdown = await waitForFeishuElement(() => exactTextElement('Markdown'), 12000, 'MARKDOWN_MENU');
+    }
+    activateFeishuControl(markdown);
+    const dialog = await waitForFeishuElement(() => [...document.querySelectorAll('[role="dialog"],.docx-export-panel')]
+      .find((node) => String(node.textContent || '').includes('导出 Markdown 设置')), 15000, 'MARKDOWN_DIALOG');
+    const textOnly = exactTextElement('仅文本（不含图片和附件）', dialog) || exactTextElement('仅文本', dialog);
+    const radio = textOnly?.closest?.('label,[role="radio"]') || textOnly;
+    if (radio && radio.getAttribute?.('aria-checked') !== 'true' && !radio.querySelector?.('input:checked')) activateFeishuControl(radio);
+    const exportButton = exactTextElement('导出', dialog);
+    if (!exportButton) throw new Error('FEISHU_EXPORT_BUTTON_NOT_FOUND');
+    activateFeishuControl(exportButton);
+  } finally {
+    setTimeout(() => conceal.remove(), 1000);
+  }
+}
+
+function normalizeZipPath(value = '') {
+  let path = String(value || '').trim().replace(/^<|>$/g, '');
+  try { path = decodeURIComponent(path); } catch {}
+  return path.replace(/^\.\//, '').replace(/\\/g, '/');
+}
+
+function markdownPlainText(markdown = '') {
+  return String(markdown || '')
+    .replace(/!\[[^\]]*\]\([^\n)]+\)/g, '')
+    .replace(/\[([^\]]+)\]\([^\n)]+\)/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^>\s?/gm, '')
+    .replace(/[*_`~\\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function markdownExportPayload(payload, options, updateProgress, isCancelled, deadlineAt) {
+  let markdown = '';
+  let entries = [];
+  const mime = String(payload.mime || '').toLowerCase();
+  if (/markdown|text\/plain/.test(mime) || /\.md$/i.test(payload.filename || '')) {
+    markdown = new TextDecoder('utf-8').decode(payload.buffer);
+  } else {
+    entries = await globalThis.IFANR_ZIP_READER.readEntries(payload.buffer);
+    const markdownEntry = entries.find((entry) => !entry.directory && /\.md$/i.test(entry.name));
+    if (!markdownEntry) throw new Error('FEISHU_MARKDOWN_ENTRY_NOT_FOUND');
+    markdown = new TextDecoder('utf-8').decode(markdownEntry.bytes);
+  }
+  if (!markdown.trim()) throw new Error('FEISHU_MARKDOWN_EMPTY');
+
+  const entryByPath = new Map(entries.filter((entry) => !entry.directory).map((entry) => [normalizeZipPath(entry.name), entry]));
+  const imageMatches = [...markdown.matchAll(/!\[([^\]]*)\]\(([^\n)]+)\)/g)];
+  const replacements = new Map();
+  let processedBytes = 0;
+  for (let index = 0; index < imageMatches.length; index += 1) {
+    if (isCancelled()) throw { code: 'COMPILE_CANCELLED', message: '任务已停止。' };
+    const original = imageMatches[index][0];
+    const destination = imageMatches[index][2].trim().replace(/\s+["'][^"']*["']$/, '');
+    const normalized = normalizeZipPath(destination);
+    let blob = null;
+    const entry = entryByPath.get(normalized) || [...entryByPath.entries()].find(([path]) => path.endsWith(`/${normalized.split('/').at(-1)}`))?.[1];
+    if (entry) blob = new Blob([entry.bytes], { type: inferImageMime(entry.name) });
+    else if (/^https?:\/\//i.test(normalized)) {
+      const response = await fetch(normalized, { credentials: 'include' });
+      if (response.ok) blob = await response.blob();
+    }
+    if (!blob || blob.size < 200) throw new Error(`FEISHU_MARKDOWN_IMAGE_UNAVAILABLE_${index + 1}`);
+    const sourceMime = String(blob.type || inferImageMime(normalized)).toLowerCase().split(';')[0];
+    let output = { blob, mime: sourceMime };
+    if (sourceMime !== 'image/gif' && globalThis.IFANR_LARK_IMAGE_PROCESSOR?.processStaticImage) {
+      output = await globalThis.IFANR_LARK_IMAGE_PROCESSOR.processStaticImage(blob, {
+        maxWidth: Number(options.larkMaxImageWidth || 1280),
+        roundImages: options.larkRoundImages !== false,
+        quality: Number(options.staticImageQuality || 90) / 100,
+        deadlineAt
+      });
+    }
+    processedBytes += Number(output.blob?.size || 0);
+    const dataUri = await blobToDataUri(output.blob);
+    replacements.set(original, `![${imageMatches[index][1]}](${dataUri})`);
+    await updateProgress({
+      phase: 'browser-downloading-images',
+      percent: 16 + Math.round(72 * (index + 1) / Math.max(1, imageMatches.length)),
+      message: `Markdown 全文已获取，正在处理原图 ${index + 1} / ${imageMatches.length}`,
+      imageIndex: index + 1,
+      imageCount: imageMatches.length
+    });
+  }
+  for (const [from, to] of replacements) markdown = markdown.split(from).join(to);
+  const plainText = markdownPlainText(markdown);
+  if (plainText.length < 80) throw new Error('FEISHU_MARKDOWN_INCOMPLETE');
+  return { markdown, imageCount: imageMatches.length, processedBytes, plainText };
+}
+
+async function captureViaSilentMarkdownExport(message, updateProgress, isCancelled, deadlineAt) {
+  const requestId = `${message.requestId}:markdown`;
+  await updateProgress({ phase: 'browser-exporting-markdown', percent: 5, message: '正在静默获取飞书 Markdown 全文' });
+  const bridge = beginSilentExportBridge(requestId);
+  try {
+    await automateFeishuMarkdownExport();
+    const payload = await bridge.promise;
+    const exported = await markdownExportPayload(payload, message.options || {}, updateProgress, isCancelled, deadlineAt);
+    const title = feishuTitle();
+    const completedAt = new Date().toISOString();
+    const stagingKey = `${IFANR_STAGING_KEY_PREFIX}${message.requestId}`;
+    const blockCount = exported.markdown.split(/\n{2,}/).filter((part) => part.trim()).length;
+    const fixture = {
+      title,
+      sourceUrl: message.sourceUrl,
+      rawMarkdown: exported.markdown,
+      rawBlocks: [],
+      blockCount,
+      imageCount: exported.imageCount,
+      galleryCount: 0,
+      galleryMode: 'automatic',
+      readerMode: 'feishu-markdown-export',
+      textFidelity: {
+        confirmed: true,
+        observedLength: exported.plainText.length,
+        fingerprint: globalThis.IFANR_FEISHU_PAGE_READER.textFingerprint?.(exported.plainText) || null,
+        tail: exported.plainText.slice(-120)
+      },
+      imageFidelity: {
+        confirmed: true,
+        sourceImageCount: exported.imageCount,
+        renderedImageCount: exported.imageCount
+      },
+      gifWarnings: [],
+      contentWarnings: [],
+      titleImageBrand: message.options?.titleImageBrand || 'auto',
+      titleImagePreference: message.options?.titleImageBrand || 'auto',
+      capture: {
+        mode: 'silent-markdown-export',
+        mediaBytes: exported.processedBytes,
+        exportedImageCount: exported.imageCount
+      }
+    };
+    await chrome.storage.local.set({ [stagingKey]: { requestId: message.requestId, sourceUrl: message.sourceUrl, fixture, completedAt } });
+    return { ok: true, stagingKey, fixture: { title, blockCount, imageCount: exported.imageCount, sourceUrl: message.sourceUrl, readerMode: fixture.readerMode } };
+  } catch (error) {
+    bridge.cancel(error?.message || 'FEISHU_MARKDOWN_EXPORT_CANCELLED');
+    throw error;
+  }
+}
+
 async function captureCurrentFeishuPage(message) {
   const requestId = message.requestId;
   const sourceUrl = message.sourceUrl;
@@ -569,7 +862,7 @@ async function captureCurrentFeishuPage(message) {
     if (Date.now() >= deadlineAt) {
       throw {
         code: 'COMPILE_TIMEOUT',
-        message: '通过当前飞书页面读取超过 45 秒，已自动停止。',
+        message: '通过当前飞书页面读取超过 120 秒，已自动停止。',
         phase: 'browser-reading'
       };
     }
@@ -589,6 +882,17 @@ async function captureCurrentFeishuPage(message) {
   };
   try {
     await updateProgress({ phase: 'browser-starting', percent: 2, message: '正在使用当前飞书页面读取文档' });
+    try {
+      return await captureViaSilentMarkdownExport(message, updateProgress, isCancelled, deadlineAt);
+    } catch (markdownError) {
+      console.warn('[Lark2Pad] 静默 Markdown 导出不可用，回退到完整滚动读取。', markdownError);
+      await updateProgress({
+        phase: 'browser-markdown-fallback',
+        percent: 5,
+        message: 'Markdown 静默读取未完成，正在切换到完整滚动读取',
+        markdownError: markdownError?.message || String(markdownError)
+      });
+    }
     const collected = await collectFeishuBlocks(updateProgress, isCancelled);
     const title = feishuTitle();
     const titleImageSelection = globalThis.IFANR_TITLE_IMAGE_BRAND?.resolve({

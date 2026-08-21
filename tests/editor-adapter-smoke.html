@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Editor adapter smoke test</title>
+  <style>
+    .ProseMirror { width: 640px; min-height: 400px; }
+    img { display: block; width: 32px; height: 32px; }
+  </style>
+</head>
+<body>
+  <div id="ueditor_0"><div class="ProseMirror" contenteditable="true"></div></div>
+  <div data-save-status>已保存</div>
+  <pre id="output">RUNNING</pre>
+  <script src="../extension/editor-adapter.js"></script>
+  <script>
+    const editor = document.querySelector('.ProseMirror');
+    const hostedImage = 'http://127.0.0.1:18765/extension/icons/icon16.png';
+    editor.addEventListener('paste', (event) => {
+      event.preventDefault();
+      document.execCommand('insertHTML', false, event.clipboardData.getData('text/html'));
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste' }));
+    });
+    editor.addEventListener('input', () => {
+      for (const image of editor.querySelectorAll('img[src^="data:image/"]')) {
+        image.src = hostedImage;
+      }
+    });
+
+    const pixel = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL5WQAAAABJRU5ErkJggg==';
+    const imageCount = 15;
+    const images = Array.from({ length: imageCount }, (_, index) =>
+      `<section style="margin:24px 0"><img src="${pixel}" alt="image-${index + 1}" style="display:block;width:32px;height:32px"></section>`
+    ).join('');
+    const article = `
+      <section data-ifanr-template="smoke">
+        <section data-ifanr-block="paragraph" data-ifanr-style-role="body" style="margin:0 16px 24px;color:#222222;font-size:15px;line-height:1.8;">Alpha</section>
+        ${images}
+        <section data-ifanr-block="paragraph" data-ifanr-style-role="body" style="margin:0 16px 24px;color:#222222;font-size:15px;line-height:1.8;">Omega tail sentinel</section>
+      </section>`;
+
+    WechatEditorAdapter.injectHtml(article, {
+      expectedImageCount: imageCount,
+      sourceImageCount: imageCount,
+      expectedTextContains: 'Omega tail sentinel',
+      expectedMinimumTextLength: 20,
+      forceEditorReplace: true,
+      requireHostedImages: true,
+      clickSaveAsDraft: false,
+      imageUploadBatchSize: 3,
+      imageBatchTimeoutMs: 2000,
+      imageStallTimeoutMs: 2000,
+      saveTimeoutMs: 6000,
+      timeoutMs: 8000
+    }).then((result) => {
+      const pass = result.confirmedStagedImageCount === imageCount &&
+        result.pendingEmbeddedImageCount === 0 &&
+        result.imageUploadConfirmed === true &&
+        result.saved === true &&
+        result.minimumTextLengthConfirmed === true &&
+        result.injectionMethod.includes('single-rich-text-paste') &&
+        result.injectionMethod.includes('atomic-full-article');
+      document.querySelector('#output').textContent = JSON.stringify({
+        pass,
+        confirmed: result.confirmedStagedImageCount,
+        pending: result.pendingEmbeddedImageCount,
+        batches: result.imageUploadBatchCount,
+        injectionMethod: result.injectionMethod,
+        saved: result.saved
+      });
+      document.title = pass ? 'PASS' : 'FAIL';
+    }).catch((error) => {
+      document.querySelector('#output').textContent = JSON.stringify({ pass: false, error: error.message, result: error.result || null });
+      document.title = 'FAIL';
+    });
+  </script>
+</body>
+</html>

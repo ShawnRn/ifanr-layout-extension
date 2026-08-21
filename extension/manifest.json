@@ -45,7 +45,16 @@
         "https://*.feishu.cn/wiki/*",
         "https://*.feishu.cn/docx/*"
       ],
-      "js": ["lib/turndown.js", "lib/turndown-plugin-gfm.js", "lib/turndown-wrapper.js", "source-link.js", "static-image-compression.js", "lark-image-processor.js", "title-image-brand.js", "lark2pad-converter.js", "feishu-page-reader.js", "feishu-content-script.js"],
+      "js": ["feishu-export-bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://*.feishu.cn/wiki/*",
+        "https://*.feishu.cn/docx/*"
+      ],
+      "js": ["lib/turndown.js", "lib/turndown-plugin-gfm.js", "lib/turndown-wrapper.js", "source-link.js", "static-image-compression.js", "lark-image-processor.js", "title-image-brand.js", "lark2pad-converter.js", "feishu-page-reader.js", "zip-reader.js", "feishu-content-script.js"],
       "run_at": "document_idle"
     },
     {
