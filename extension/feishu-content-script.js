@@ -697,7 +697,7 @@ function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', orig
   }
 
   // 4. 基于 Token 构造高清地址
-  if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
+  if (token && token.length >= 10) {
     const host = location.host.includes('feishu.cn') ? location.host : 'internal-api-drive-stream.feishu.cn';
     candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=1`);
     candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=15`);
