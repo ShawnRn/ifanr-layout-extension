@@ -757,52 +757,54 @@ function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', orig
   return [...new Set(candidates.filter(Boolean))];
 }
 
-async function fetchImageAsDataUri(src, token = '', srcset = '', originSrc = '', dataSrc = '') {
-  if (!src || src.startsWith('data:')) return src;
-  const candidates = getHighResFeishuImageCandidates(src, token, srcset, originSrc, dataSrc);
+async function getImageBlob(imageUrl) {
+  if (!imageUrl || imageUrl.startsWith('data:')) return null;
 
-  let bestBlob = null;
-
-  for (const url of candidates) {
-    try {
-      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timeoutId = controller ? setTimeout(() => controller.abort(), 2500) : null;
-      const res = await fetch(url, {
-        credentials: 'include',
-        signal: controller ? controller.signal : undefined
-      }).finally(() => {
-        if (timeoutId) clearTimeout(timeoutId);
-      });
-
-      if (res.ok) {
-        const contentType = (res.headers.get('content-type') || '').toLowerCase();
-        if (contentType.includes('application/json') || contentType.includes('text/html')) {
-          continue;
-        }
-        const blob = await res.blob();
+  // 1. 优先尝试 preview_type=1 (官方无损全分辨率原图)
+  const u1 = imageUrl.replace(/preview_type=16/g, 'preview_type=1');
+  try {
+    const res1 = await fetch(u1, { credentials: 'include', cache: 'force-cache' });
+    if (res1.ok) {
+      const contentType = (res1.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json') && !contentType.includes('text/html')) {
+        const blob = await res1.blob();
         if (blob && blob.size > 500 && (blob.type.startsWith('image/') || contentType.startsWith('image/') || !contentType)) {
-          if (!bestBlob || blob.size > bestBlob.size) {
-            bestBlob = blob;
-          }
-          // 只要成功拿到有效无损原图二进制，立即采用
-          if (blob.size > 20 * 1024 || (url.includes('preview_type=1') && blob.size > 2000)) {
-            break;
-          }
+          return blob;
         }
       }
-    } catch {}
-  }
+    }
+  } catch {}
 
-  if (bestBlob) {
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result);
-      reader.onerror = () => resolve(src);
-      reader.readAsDataURL(bestBlob);
-    });
-  }
+  // 2. 尝试 preview_type=15 (4K 极清预览)
+  const u15 = imageUrl.replace(/preview_type=16/g, 'preview_type=15');
+  try {
+    const res15 = await fetch(u15, { credentials: 'include', cache: 'force-cache' });
+    if (res15.ok) {
+      const contentType = (res15.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json') && !contentType.includes('text/html')) {
+        const blob = await res15.blob();
+        if (blob && blob.size > 500 && (blob.type.startsWith('image/') || contentType.startsWith('image/') || !contentType)) {
+          return blob;
+        }
+      }
+    }
+  } catch {}
 
-  return src;
+  // 3. 从浏览器缓存直接提取原始图片二进制 (100% 成功率保障)
+  try {
+    const resOrig = await fetch(imageUrl, { credentials: 'include', cache: 'force-cache' });
+    if (resOrig.ok) {
+      const contentType = (resOrig.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json') && !contentType.includes('text/html')) {
+        const blob = await resOrig.blob();
+        if (blob && blob.size > 200) {
+          return blob;
+        }
+      }
+    }
+  } catch {}
+
+  return null;
 }
 
 async function extractFeishuDocDirect() {
@@ -856,27 +858,35 @@ async function extractFeishuDocDirect() {
   await Promise.all(imageBlocks.map(async (block) => {
     const src = block.image?.originSrc || block.image?.currentSrc || block.image?.src;
     const token = block.image?.token;
-    const srcset = block.image?.srcset;
-    const originSrc = block.image?.originSrc || src;
     const dataSrc = block.image?.dataSrc || '';
 
-    let dataUri = null;
-    if (src || token || dataSrc) {
-      dataUri = await fetchImageAsDataUri(src, token, srcset, originSrc, dataSrc);
+    let blob = null;
+    if (src) {
+      blob = await getImageBlob(src);
+    }
+    if (!blob && dataSrc) {
+      blob = await getImageBlob(dataSrc);
     }
 
-    if (dataUri && dataUri.startsWith('data:')) {
-      block.image.dataUri = dataUri;
-      block.image.src = dataUri;
+    if (blob) {
+      const dataUri = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+      if (dataUri) {
+        block.image.dataUri = dataUri;
+        block.image.src = dataUri;
+      }
+    } else if (block.image?.fallbackDataUri) {
+      block.image.dataUri = block.image.fallbackDataUri;
+      block.image.src = block.image.fallbackDataUri;
     }
 
     // 构造全尺寸无损高清原图 URL 给 Pad 与 Markdown
     if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
       block.image.originSrc = `https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${token}/?preview_type=1`;
-    } else if (dataSrc && !dataSrc.includes('preview_type=16')) {
-      block.image.originSrc = dataSrc;
-    } else if (originSrc) {
-      block.image.originSrc = originSrc.replace(/preview_type=16/g, 'preview_type=1');
     } else if (src) {
       block.image.originSrc = src.replace(/preview_type=16/g, 'preview_type=1');
     }
