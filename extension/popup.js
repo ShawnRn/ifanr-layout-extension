@@ -213,8 +213,8 @@
 
   async function saveSettings() {
     settings.titleImageBrand = titleImageBrandSelect?.value || 'auto';
-    settings.roundImages = roundImagesToggle?.checked !== false;
-    settings.autoBanners = autoBannersToggle?.checked !== false;
+    settings.roundImages = roundImagesBtn ? roundImagesBtn.classList.contains('is-active') : true;
+    settings.autoBanners = autoBannersBtn ? autoBannersBtn.classList.contains('is-active') : true;
     await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
   }
 
