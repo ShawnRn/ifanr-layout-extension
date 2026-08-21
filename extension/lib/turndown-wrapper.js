@@ -94,11 +94,19 @@ function loadHtmlAndGetImages(htmlStr) {
     const parser = new DOMParser();
     window.activeDoc = parser.parseFromString(htmlStr, 'text/html');
 
-    // 多余空行清理
-    const blocks = window.activeDoc.querySelectorAll('p, div');
+    // 清理飞书文档头部、操作按钮与侧边栏噪音元素
+    const noisyElements = window.activeDoc.querySelectorAll('.wiki-catalog, .docx-catalog, .doc-info-sidebar, [data-block-type="catalog"], .bear-web-catalog, .docx-page-header, .doc-header, .page-header, .render-unit-header, .suite-doc-header, .wiki-header, .wiki-header-container, .cover-container, .icon-container, .header-actions, .docx-icon-and-cover, .page-icon-wrapper, .page-cover-wrapper, .author-info, .doc-creator-info, .comment-box, .comment-container');
+    noisyElements.forEach(node => node.remove());
+
+    const uiNoiseRegex = /^(?:添加图标|添加封面|点击添加图标|点击添加封面|更换图标|更换封面|移除封面|移除图标|添加表情|添加背景|添加描述|添加标签|新建页面|关联页面|评论|#|\/\/)$/i;
+
+    // 多余空行与噪音文本清理
+    const blocks = window.activeDoc.querySelectorAll('p, div, h1, h2, h3, span');
     blocks.forEach(node => {
-        const text = node.textContent.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
+        const text = node.textContent.replace(/[\s\u200B-\u200D\uFEFF]/g, '').trim();
         if (text === '' && !node.querySelector('img, video, iframe')) {
+            node.remove();
+        } else if (uiNoiseRegex.test(text) && !node.querySelector('img, video, iframe')) {
             node.remove();
         }
     });

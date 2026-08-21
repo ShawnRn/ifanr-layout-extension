@@ -538,12 +538,19 @@ ${body}
     }).join('').trim();
   }
 
+  const FEISHU_UI_NOISE_TEXT = /^(?:添加图标|添加封面|点击添加图标|点击添加封面|更换图标|更换封面|移除封面|移除图标|添加表情|添加背景|添加描述|添加标签|新建页面|关联页面|评论|#|\/\/)$/i;
+
   function blocksToMarkdown(blocks = []) {
     const lines = [];
     let lastImageKey = '';
 
     for (const block of blocks) {
       const type = String(block.type || '').toLowerCase();
+      const rawText = String(block.text || '').trim();
+
+      if (rawText && FEISHU_UI_NOISE_TEXT.test(rawText)) {
+        continue;
+      }
 
       // Heading
       const headingMatch = type.match(/^heading([1-6])$/i);
