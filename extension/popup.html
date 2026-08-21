@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>爱范儿一键排版 (Lark2Pad)</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --brand: #FD4606;
+      --brand-dark: #D93B04;
+      --ink: #25211F;
+      --muted: #756D67;
+      --paper: #FFFDFC;
+      --canvas: #F7F1E8;
+      --line: #E8DED2;
+      --success: #287A50;
+      --success-bg: #EDF7F1;
+      --warning: #9A5A14;
+      --warning-bg: #FFF5E6;
+      --danger: #B43A32;
+      --danger-bg: #FFF0EE;
+      --shadow: 0 8px 24px rgba(70, 46, 30, .07);
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      width: 380px;
+      max-width: 100%;
+      height: 560px;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+      color: var(--ink);
+      background: var(--canvas);
+      font: 13px/1.5 "PingFang SC", "Hiragino Sans GB", -apple-system, BlinkMacSystemFont, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, summary { font: inherit; }
+    button:focus-visible, summary:focus-visible {
+      outline: 2px solid rgba(253, 70, 6, .35);
+      outline-offset: 2px;
+    }
+
+    /* Fixed Top Area (0-scroll) */
+    .sticky-top {
+      flex: none;
+      background: var(--canvas);
+      padding: 12px 14px 8px;
+      border-bottom: 1px solid rgba(232, 222, 210, 0.6);
+      z-index: 10;
+    }
+    .app-header {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 10px;
+    }
+    .brand-mark { width: 26px; height: 26px; border-radius: 6px; }
+    .brand-copy { min-width: 0; flex: 1; }
+    .brand-copy strong { display: block; font-size: 14px; font-weight: 600; letter-spacing: .01em; }
+    .brand-copy span { color: var(--muted); font-size: 10px; }
+    .service-pill {
+      flex: none;
+      padding: 2px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255,255,255,.6);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .service-pill[data-state="online"] { color: var(--success); border-color: #CBE4D6; background: var(--success-bg); }
+    .service-pill[data-state="offline"] { color: var(--danger); border-color: #F0C9C4; background: var(--danger-bg); }
+
+    /* Action buttons in Fixed Top */
+    .primary-dual-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .btn-main {
+      width: 100%;
+      min-height: 40px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 10px;
+      border: 0;
+      border-radius: 10px;
+      color: #FFF;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+      transition: all .15s ease;
+      white-space: nowrap;
+    }
+    .btn-extract {
+      background: var(--brand);
+      box-shadow: 0 2px 8px rgba(253, 70, 6, 0.28);
+    }
+    .btn-extract:hover:not(:disabled) { background: var(--brand-dark); transform: translateY(-1px); }
+    .btn-inject {
+      background: #07C160;
+      box-shadow: 0 2px 8px rgba(7, 193, 96, 0.28);
+    }
+    .btn-inject[data-target="wechat"] {
+      background: #07C160;
+      box-shadow: 0 2px 8px rgba(7, 193, 96, 0.28);
+    }
+    .btn-inject[data-target="pad"] {
+      background: #722ED1;
+      box-shadow: 0 2px 8px rgba(114, 46, 209, 0.28);
+    }
+    .btn-inject:hover:not(:disabled) { filter: brightness(0.92); transform: translateY(-1px); }
+    .btn-main:active:not(:disabled) { transform: translateY(1px); }
+    .btn-main:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    .quick-copy-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .action-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      min-height: 36px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      background: #FFFFFF;
+      color: var(--ink);
+      box-shadow: 0 1px 3px rgba(0,0,0,.04);
+      transition: all .15s ease;
+    }
+    .action-btn:hover:not(:disabled) {
+      background: #FAF6F0;
+      border-color: #DCCEC0;
+      transform: translateY(-1px);
+    }
+    .action-wechat {
+      color: #07C160;
+      border-color: #C1E8D1;
+      background: #F4FAF6;
+    }
+    .action-wechat:hover:not(:disabled) {
+      background: #E8F5EE;
+      border-color: #A3D8B9;
+    }
+    .action-pad {
+      color: #722ED1;
+      border-color: #E2D2F8;
+      background: #F8F3FE;
+    }
+    .action-pad:hover:not(:disabled) {
+      background: #F1E5FC;
+      border-color: #D0B6F4;
+    }
+
+    .utility-actions-row {
+      display: flex;
+      gap: 8px;
+    }
+    .btn-utility {
+      flex: 1;
+      min-height: 28px;
+      padding: 4px 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: rgba(255,255,255,0.7);
+      color: var(--muted);
+      font-size: 11px;
+      cursor: pointer;
+      transition: all .15s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+    }
+    .btn-utility:hover:not(:disabled) {
+      background: #FFF;
+      color: var(--ink);
+    }
+
+    /* Scrollable Body Area */
+    .scroll-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px 14px 16px;
+    }
+    .card {
+      margin-bottom: 9px;
+      padding: 11px 13px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: rgba(255,253,252,.95);
+      box-shadow: var(--shadow);
+    }
+
+    .status-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+      padding: 6px 10px;
+      border-radius: 8px;
+      background: #F2ECE5;
+      font-size: 11px;
+      color: var(--ink);
+    }
+    .status-summary strong { font-weight: 600; }
+    .status-summary span { color: var(--muted); }
+
+    .source-card h2 { margin: 0; font-size: 13px; line-height: 1.4; font-weight: 600; }
+    .source-meta { margin: 4px 0 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+
+    .package-card { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 8px 10px; }
+    .metric { padding: 6px 8px; border-radius: 8px; background: #F8F3ED; text-align: center; }
+    .metric span { display: block; color: var(--muted); font-size: 10px; }
+    .metric strong { display: block; margin-top: 1px; font-size: 12px; font-weight: 600; }
+
+    .quality-card { padding: 9px 12px; }
+    .quality-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .quality-row + .quality-row { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+    .quality-copy strong { display: block; font-size: 12px; font-weight: 600; }
+    .quality-copy span { display: block; margin-top: 1px; color: var(--muted); font-size: 10px; }
+    .quality-select {
+      flex: none;
+      min-height: 28px;
+      padding: 2px 20px 2px 6px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: var(--ink);
+      background: #FFF;
+      font-size: 11px;
+    }
+    .quality-toggle {
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .quality-toggle input { accent-color: var(--brand); }
+
+    .result-card { margin-top: 6px; }
+    .result-card[data-tone="success"] { border-color: #CBE4D6; background: var(--success-bg); }
+    .result-card[data-tone="warning"] { border-color: #EED6B5; background: var(--warning-bg); }
+    .result-card[data-tone="danger"] { border-color: #F0C9C4; background: var(--danger-bg); }
+    .result-card h2 { margin: 0; font-size: 12px; font-weight: 600; }
+    .result-card p { margin: 3px 0 0; color: var(--muted); font-size: 11px; white-space: pre-line; }
+
+    .toast-msg {
+      position: fixed;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-20px);
+      padding: 7px 16px;
+      background: rgba(37, 33, 31, 0.95);
+      color: #FFF;
+      border-radius: 20px;
+      font-size: 12px;
+      opacity: 0;
+      pointer-events: none;
+      transition: all .2s ease;
+      z-index: 9999;
+      white-space: nowrap;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.2);
+    }
+    .toast-msg.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+  </style>
+</head>
+<body>
+  <!-- Fixed Top Area (0-Scroll Actions) -->
+  <div class="sticky-top">
+    <header class="app-header">
+      <img class="brand-mark" src="icons/icon48.png" alt="爱范儿">
+      <div class="brand-copy">
+        <strong>爱范儿一键排版</strong>
+        <span>Lark2Pad 飞书转微信公众号 & Pad</span>
+      </div>
+      <span id="service-indicator" class="service-pill" data-state="online">Lark2Pad 原生就绪</span>
+    </header>
+
+    <!-- Dual Primary Buttons (提取与注入同级并列) -->
+    <div class="primary-dual-grid">
+      <button id="main-convert-btn" class="btn-main btn-extract" type="button">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        <span id="extract-btn-text">一键读取转换</span>
+      </button>
+
+      <button id="main-inject-btn" class="btn-main btn-inject" data-target="wechat" type="button">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+        <span id="inject-btn-text">一键注入公众号</span>
+      </button>
+    </div>
+
+    <!-- 复制快捷按钮组 -->
+    <div id="quick-copy-group" class="quick-copy-grid">
+      <button id="copy-wechat" class="action-btn action-wechat" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        复制到公众号
+      </button>
+      <button id="copy-pad" class="action-btn action-pad" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+        复制到 Pad
+      </button>
+    </div>
+
+    <!-- 辅助操作 -->
+    <div class="utility-actions-row">
+      <button id="convert-clipboard-btn" class="btn-utility" type="button">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
+        从剪贴板读取
+      </button>
+      <button id="clear-btn" class="btn-utility" type="button">清除</button>
+    </div>
+  </div>
+
+  <!-- Scrollable Options & Details Area -->
+  <div class="scroll-body">
+    <div id="status-summary" class="status-summary">
+      <strong id="status-tag">准备就绪</strong>
+      <span id="status-msg">点击左上方直接读取转换当前文档</span>
+    </div>
+
+    <section class="card source-card">
+      <h2 id="source-title">尚未选择文档</h2>
+      <p id="source-meta" class="source-meta">在飞书文档页打开，或点击“从剪贴板读取”</p>
+    </section>
+
+    <section id="package-card" class="card package-card" hidden>
+      <div class="metric"><span>内容块</span><strong id="metric-blocks">—</strong></div>
+      <div class="metric"><span>图片</span><strong id="metric-images">—</strong></div>
+      <div class="metric"><span>题图品牌</span><strong id="metric-brand">爱范儿</strong></div>
+    </section>
+
+    <section class="card quality-card">
+      <div class="quality-row">
+        <div class="quality-copy">
+          <strong>文章题图</strong>
+          <span>自动识别 AppSo / 爱范儿</span>
+        </div>
+        <select id="title-image-brand" class="quality-select" aria-label="文章题图品牌">
+          <option value="auto" selected>自动</option>
+          <option value="ifanr">爱范儿</option>
+          <option value="appso">AppSo</option>
+        </select>
+      </div>
+      <div class="quality-row">
+        <div class="quality-copy">
+          <strong>图片圆角</strong>
+          <span>静态图 2% 连续圆角 (Lark2Pad 标准)</span>
+        </div>
+        <label class="quality-toggle">
+          <input id="round-images" type="checkbox" checked> 开启
+        </label>
+      </div>
+      <div class="quality-row">
+        <div class="quality-copy">
+          <strong>顶部 / 底部 Banner</strong>
+          <span>自动插入品牌 Banner 与底栏素材</span>
+        </div>
+        <label class="quality-toggle">
+          <input id="auto-banners" type="checkbox" checked> 开启
+        </label>
+      </div>
+    </section>
+
+    <section id="result-card" class="card result-card" hidden>
+      <h2 id="result-title">转换完成</h2>
+      <p id="result-copy"></p>
+    </section>
+  </div>
+
+  <div id="toast-msg" class="toast-msg">已复制到剪贴板</div>
+
+  <script src="lib/turndown.js"></script>
+  <script src="lib/turndown-plugin-gfm.js"></script>
+  <script src="lib/turndown-wrapper.js"></script>
+  <script src="source-link.js"></script>
+  <script src="lark2pad-converter.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

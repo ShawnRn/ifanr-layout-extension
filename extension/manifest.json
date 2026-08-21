@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "爱范儿一键排版 (Lark2Pad)",
+  "version": "1.14.0",
+  "description": "一键将飞书文档排版为微信公众号与 Pad 格式，支持剪贴板一键复制与公众号自动注入。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage", "clipboardRead", "clipboardWrite"],
+  "host_permissions": [
+    "https://*.feishu.cn/*",
+    "https://*.feishucdn.com/*",
+    "https://mp.weixin.qq.com/*",
+    "https://*.ifanr.com/*",
+    "https://*.ifanr.cn/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/ifanr-title.gif", "assets/appso-title.gif"],
+      "matches": ["https://*.feishu.cn/*"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.feishu.cn/wiki/*",
+        "https://*.feishu.cn/docx/*"
+      ],
+      "js": ["lib/turndown.js", "lib/turndown-plugin-gfm.js", "lib/turndown-wrapper.js", "source-link.js", "static-image-compression.js", "lark-image-processor.js", "title-image-brand.js", "lark2pad-converter.js", "feishu-page-reader.js", "feishu-content-script.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://mp.weixin.qq.com/*",
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": ["lib/turndown.js", "lib/turndown-plugin-gfm.js", "lib/turndown-wrapper.js", "source-link.js", "page-state.js", "lark2pad-converter.js", "editor-adapter.js", "content-script.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
