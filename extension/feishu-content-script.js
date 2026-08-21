@@ -144,9 +144,11 @@ function snapshotFeishuBlock(block, captureSequence) {
     if (image?.closest('.author-info, .avatar, .user-avatar, .doc-creator-info, .header-actions, .docx-icon-and-cover, .page-icon-wrapper')) return null;
 
     const imageBlock = block.querySelector('[image-token], [data-token]') || block.closest('[image-token], [data-token]') || block;
-    const token = imageBlock?.getAttribute('image-token') || imageBlock?.getAttribute('data-token') || block.getAttribute('data-record-id') || null;
-    const originSrc = image?.getAttribute('data-origin-src') || image?.getAttribute('data-full-src') || image?.getAttribute('data-src') || image?.getAttribute('data-url') || null;
-    const source = originSrc || image?.src || (token ? `https://${location.host}/space/api/box/stream/download/preview/${token}/?preview_type=16` : null);
+    const token = image?.getAttribute('data-token') || imageBlock?.getAttribute('image-token') || imageBlock?.getAttribute('data-token') || block.getAttribute('data-record-id') || null;
+    const dataSrc = image?.getAttribute('data-src') || imageBlock?.getAttribute('data-src') || null;
+    const originSrc = image?.getAttribute('data-origin-src') || image?.getAttribute('data-full-src') || dataSrc || image?.getAttribute('data-url') || null;
+    const recordId = block.getAttribute('data-record-id') || block.getAttribute('data-block-id') || null;
+    const source = dataSrc || originSrc || (token ? `https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${token}/?preview_type=1` : null) || image?.src;
     const srcset = image?.getAttribute('srcset') || null;
 
     // 兜底记录 DOM Canvas Base64
@@ -162,16 +164,18 @@ function snapshotFeishuBlock(block, captureSequence) {
         order,
         captureSequence,
         type: 'image',
-        recordId: block.getAttribute('data-record-id') || null,
+        recordId,
         image: {
           src: source,
           currentSrc: source ? (image?.currentSrc || source) : null,
           originSrc: originSrc || source,
+          dataSrc,
           dataUri: null,
           fallbackDataUri,
           srcset,
           alt: image?.alt || '',
           token,
+          recordId,
           width: Number(image?.naturalWidth || image?.width || 0),
           height: Number(image?.naturalHeight || image?.height || 0)
         }
@@ -687,64 +691,60 @@ async function captureCurrentFeishuPage(message) {
   }
 }
 
-function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', originSrc = '') {
-  if (!src && !token && !originSrc) return [];
+function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', originSrc = '', dataSrc = '', recordId = '') {
+  if (!src && !token && !originSrc && !dataSrc) return [];
   const candidates = [];
+  const driveHost = 'internal-api-drive-stream.feishu.cn';
 
-  const baseSrc = originSrc || src;
-  let driveHost = 'internal-api-drive-stream.feishu.cn';
-  let tokenFromUrl = token;
-
-  if (baseSrc && !baseSrc.startsWith('data:')) {
-    try {
-      const u = new URL(baseSrc, location.href);
-      if (u.hostname.includes('drive-stream') || u.hostname.includes('feishu.cn')) {
-        driveHost = u.hostname;
-      }
-      const match = baseSrc.match(/box[a-zA-Z0-9]{15,}/);
-      if (match && match[0]) {
-        tokenFromUrl = match[0];
-      }
-
-      // 1. 无损全尺寸原图 preview_type=1
-      const u1 = new URL(baseSrc, location.href);
-      u1.searchParams.set('preview_type', '1');
-      u1.searchParams.delete('width');
-      u1.searchParams.delete('height');
-      u1.searchParams.delete('size');
-      u1.searchParams.delete('rule');
-      candidates.push(u1.toString());
-
-      // 2. 4K 极清 preview_type=15
-      const u15 = new URL(baseSrc, location.href);
-      u15.searchParams.set('preview_type', '15');
-      u15.searchParams.delete('width');
-      u15.searchParams.delete('height');
-      u15.searchParams.delete('size');
-      u15.searchParams.delete('rule');
-      candidates.push(u15.toString());
-
-      // 3. 原始数据流（移除所有尺寸和预览参数）
-      const uRaw = new URL(baseSrc, location.href);
-      uRaw.searchParams.delete('preview_type');
-      uRaw.searchParams.delete('width');
-      uRaw.searchParams.delete('height');
-      uRaw.searchParams.delete('size');
-      uRaw.searchParams.delete('rule');
-      candidates.push(uRaw.toString());
-    } catch {}
+  // 1. 如果有官方全尺寸挂载数据流 data-src，置为最高优先级
+  if (dataSrc && !dataSrc.startsWith('data:')) {
+    candidates.push(dataSrc);
   }
 
-  const effectiveToken = token || tokenFromUrl;
-  if (effectiveToken && (effectiveToken.startsWith('boxcn') || effectiveToken.startsWith('box'))) {
-    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${effectiveToken}/?preview_type=1`);
-    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${effectiveToken}/?preview_type=15`);
-    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${effectiveToken}/`);
-    candidates.push(`https://${driveHost}/space/api/box/stream/download/all/${effectiveToken}/`);
-    if (driveHost !== 'internal-api-drive-stream.feishu.cn') {
-      candidates.push(`https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${effectiveToken}/?preview_type=1`);
-      candidates.push(`https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${effectiveToken}/?preview_type=15`);
+  // 2. 如果有 token 和 recordId，构造带挂载节点的官方无损全尺寸数据流
+  if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
+    if (recordId) {
+      candidates.push(`https://${driveHost}/space/api/box/stream/download/all/${token}/?mount_node_token=${recordId}&mount_point=docx_image`);
+      candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?mount_node_token=${recordId}&mount_point=docx_image&preview_type=1`);
+      candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?mount_node_token=${recordId}&mount_point=docx_image&preview_type=15`);
     }
+    // 标准无损全尺寸 preview_type=1 与 4K preview_type=15
+    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?preview_type=1`);
+    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?preview_type=15`);
+    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/`);
+    candidates.push(`https://${driveHost}/space/api/box/stream/download/all/${token}/`);
+  }
+
+  // 3. 针对 baseSrc 进行 preview_type=1 替换
+  const baseSrc = originSrc || src;
+  if (baseSrc && !baseSrc.startsWith('data:')) {
+    try {
+      const u1 = new URL(baseSrc, location.href);
+      if (u1.hostname.includes('feishu.cn') || u1.hostname.includes('feishucdn.com')) {
+        u1.searchParams.set('preview_type', '1');
+        u1.searchParams.delete('width');
+        u1.searchParams.delete('height');
+        u1.searchParams.delete('size');
+        u1.searchParams.delete('rule');
+        candidates.push(u1.toString());
+
+        const u15 = new URL(baseSrc, location.href);
+        u15.searchParams.set('preview_type', '15');
+        u15.searchParams.delete('width');
+        u15.searchParams.delete('height');
+        u15.searchParams.delete('size');
+        u15.searchParams.delete('rule');
+        candidates.push(u15.toString());
+
+        const uRaw = new URL(baseSrc, location.href);
+        uRaw.searchParams.delete('preview_type');
+        uRaw.searchParams.delete('width');
+        uRaw.searchParams.delete('height');
+        uRaw.searchParams.delete('size');
+        uRaw.searchParams.delete('rule');
+        candidates.push(uRaw.toString());
+      }
+    } catch {}
   }
 
   // 4. 显式原图属性
@@ -764,16 +764,16 @@ function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', orig
   return [...new Set(candidates.filter(Boolean))];
 }
 
-async function fetchImageAsDataUri(src, token = '', srcset = '', originSrc = '') {
+async function fetchImageAsDataUri(src, token = '', srcset = '', originSrc = '', dataSrc = '', recordId = '') {
   if (!src || src.startsWith('data:')) return src;
-  const candidates = getHighResFeishuImageCandidates(src, token, srcset, originSrc);
+  const candidates = getHighResFeishuImageCandidates(src, token, srcset, originSrc, dataSrc, recordId);
 
   let bestBlob = null;
 
   for (const url of candidates) {
     try {
       const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timeoutId = controller ? setTimeout(() => controller.abort(), 3500) : null;
+      const timeoutId = controller ? setTimeout(() => controller.abort(), 4000) : null;
       const res = await fetch(url, {
         credentials: 'include',
         signal: controller ? controller.signal : undefined
@@ -786,7 +786,7 @@ async function fetchImageAsDataUri(src, token = '', srcset = '', originSrc = '')
         if (blob && blob.size > 200) {
           bestBlob = blob;
           // 只要成功拿到全分辨率原图或大于 50KB 的清晰大图，立即采用
-          if (blob.size > 50 * 1024 || url.includes('preview_type=1') || url.includes('preview_type=15')) {
+          if (blob.size > 50 * 1024 || url.includes('preview_type=1') || url.includes('preview_type=15') || url.includes('/download/all/')) {
             break;
           }
         }
@@ -863,10 +863,12 @@ async function extractFeishuDocDirect() {
       const token = block.image?.token;
       const srcset = block.image?.srcset;
       const originSrc = block.image?.originSrc || src;
+      const dataSrc = block.image?.dataSrc || '';
+      const recordId = block.image?.recordId || block.recordId || '';
 
       let dataUri = null;
-      if (src || token) {
-        dataUri = await fetchImageAsDataUri(src, token, srcset, originSrc);
+      if (src || token || dataSrc) {
+        dataUri = await fetchImageAsDataUri(src, token, srcset, originSrc, dataSrc, recordId);
       }
 
       if (dataUri && dataUri.startsWith('data:')) {
@@ -876,7 +878,9 @@ async function extractFeishuDocDirect() {
       }
 
       // 构造全尺寸高清原图 URL 给 Pad
-      if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
+      if (dataSrc) {
+        block.image.originSrc = dataSrc;
+      } else if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
         block.image.originSrc = `https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${token}/?preview_type=1`;
       } else if (!block.image.originSrc) {
         block.image.originSrc = src;

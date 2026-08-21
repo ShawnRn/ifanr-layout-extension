@@ -266,6 +266,45 @@
     return { html, text };
   }
 
+  async function ensureWechatImagesAreBase64(html) {
+    if (!html || !html.includes('http')) return html;
+    const imgRegex = /<img\b[^>]*?\bsrc=["'](https?:\/\/[^"']+)["'][^>]*>/gi;
+    const matches = [...html.matchAll(imgRegex)];
+    if (matches.length === 0) return html;
+
+    const urls = [...new Set(matches.map((m) => m[1]))].filter((u) => !u.includes('qpic.cn') && !u.includes('weixin.qq.com'));
+    if (urls.length === 0) return html;
+
+    let updatedHtml = html;
+    await Promise.all(urls.map(async (url) => {
+      try {
+        let fetchUrl = url;
+        if (fetchUrl.includes('preview_type=16')) {
+          fetchUrl = fetchUrl.replace('preview_type=16', 'preview_type=1');
+        }
+        const res = await fetch(fetchUrl, { credentials: 'include' });
+        if (res.ok) {
+          const blob = await res.blob();
+          if (blob && blob.size > 200) {
+            const dataUri = await new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onloadend = () => resolve(reader.result);
+              reader.onerror = () => resolve(null);
+              reader.readAsDataURL(blob);
+            });
+            if (dataUri) {
+              updatedHtml = updatedHtml.split(url).join(dataUri);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to convert image to DataURI:', url, e);
+      }
+    }));
+
+    return updatedHtml;
+  }
+
   /**
    * 执行核心转换逻辑 (纯前端 100% 内存极速转换)
    */
@@ -283,6 +322,8 @@
       addFooterBanner: settings.autoBanners
     });
 
+    const wechatHtml = await ensureWechatImagesAreBase64(converted.wechatHtml);
+
     const pkg = {
       title: cleanDisplayTitle(title),
       sourceUrl,
@@ -291,9 +332,28 @@
       cleanMarkdown: converted.cleanMarkdown || converted.markdown,
       wechatMarkdown: converted.wechatMarkdown || converted.markdown,
       rawInput: (typeof htmlOrMarkdown === 'object' || Array.isArray(htmlOrMarkdown)) ? htmlOrMarkdown : (cachedPackage?.rawInput || htmlOrMarkdown),
-      wechatHtml: converted.wechatHtml,
+      wechatHtml,
       etherpadBody: converted.etherpadBody || converted.etherpadHtml,
       etherpadHtml: converted.etherpadHtml,
+      imageCount: converted.imageCount,
+      blockCount: converted.blockCount,
+      convertedAt: new Date().toISOString()
+    };
+
+    cachedPackage = pkg;
+    await chrome.storage.local.set({
+      [CACHE_KEY]: pkg,
+      [ARTICLE_PKG_KEY]: {
+        html: wechatHtml,
+        sourceUrl,
+        title: pkg.title,
+        brand
+      }
+    });
+    renderPackage(pkg);
+    showBadgeSuccess();
+    return pkg;
+  }l,
       imageCount: converted.imageCount,
       blockCount: converted.blockCount,
       convertedAt: new Date().toISOString()

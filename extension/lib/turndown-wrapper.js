@@ -140,7 +140,7 @@ function loadHtmlAndGetImages(htmlStr) {
                             newSrc = decodeURIComponent(item.src);
                         }
                         if (!newSrc && item.file_token) {
-                            newSrc = 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/' + item.file_token + '/?preview_type=16';
+                            newSrc = 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/' + item.file_token + '/?preview_type=1';
                         }
 
                         if (newSrc) {
@@ -165,7 +165,41 @@ function loadHtmlAndGetImages(htmlStr) {
             img.remove();
             return;
         }
-        let src = img.getAttribute('src') || '';
+
+        // 优先提取剪贴板中的官方全尺寸数据流 data-src 或构造 preview_type=1 原图
+        let src = img.getAttribute('data-src') || img.getAttribute('data-origin-src') || img.getAttribute('src') || '';
+        const suite = img.getAttribute('data-suite');
+        const snapshot = img.getAttribute('data-snapshot');
+        let token = null;
+        let objToken = null;
+
+        if (suite) {
+            try {
+                const parsed = typeof suite === 'string' && suite.startsWith('{') ? JSON.parse(suite) : JSON.parse(decodeURIComponent(suite));
+                token = parsed.fileToken || parsed.token;
+                objToken = parsed.objToken;
+            } catch {}
+        }
+        if (!token && snapshot) {
+            try {
+                const decoded = atob(snapshot);
+                const parsed = JSON.parse(decoded);
+                token = parsed.image?.token || parsed.token;
+            } catch {}
+        }
+
+        if (token && objToken) {
+            src = 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/all/' + token + '/?mount_node_token=' + objToken + '&mount_point=docx_image';
+        } else if (token) {
+            src = 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/' + token + '/?preview_type=1';
+        } else if (src.includes('preview_type=16')) {
+            src = src.replace('preview_type=16', 'preview_type=1');
+        }
+
+        if (src) {
+            img.setAttribute('src', src);
+        }
+
         if (!src || src.startsWith('data:image/svg+xml')) {
             return;
         }
