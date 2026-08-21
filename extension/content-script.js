@@ -267,7 +267,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!['IFANR_INJECT_HTML', 'IFANR_INJECT_STORED_PACKAGE'].includes(message?.type)) return false;
   const requestId = message.requestId || globalThis.crypto?.randomUUID?.() || String(Date.now());
   const startedAt = new Date().toISOString();
-  const deadlineAt = new Date(Date.now() + Number(message.options?.timeoutMs || 45000)).toISOString();
+  const deadlineAt = new Date(Date.now() + Number(message.options?.timeoutMs || 180000)).toISOString();
   const baseStatus = {
     requestId,
     sourceUrl: message.sourceUrl || null,
@@ -365,27 +365,30 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .catch(async (error) => {
       const response = { ok: false, error: error.message, result: error.result, completedAt: new Date().toISOString() };
       response.sourceUrl = message.sourceUrl || null;
+      const isPreuploadFailure = ['WECHAT_CDN_UPLOAD_FAILED', 'WECHAT_TOKEN_NOT_FOUND'].includes(error.message);
+      const isHostedImageFailure = error.message === 'WECHAT_IMAGE_UPLOAD_NOT_CONFIRMED';
+      const failurePhase = isPreuploadFailure || isHostedImageFailure
+        ? 'uploading-images'
+        : error.message === 'WECHAT_STYLE_NOT_CONFIRMED'
+          ? 'validating-write'
+          : error.message === 'WECHAT_EDITOR_CLEAR_NOT_CONFIRMED' ? 'clearing-editor' : 'write-failed';
+      const uploadedImageCount = Number(error.result?.uploadedImageCount || error.result?.wechatCdnImageCount || 0);
+      const expectedUploadImageCount = Number(error.result?.expectedUploadImageCount || message.options?.expectedImageCount || 0);
       await chrome.storage.local.set({
         ifanrLastResult: response,
         [WECHAT_WRITE_STATUS_KEY]: {
           ...baseStatus,
           state: 'failed',
-          phase: error.message === 'WECHAT_IMAGE_UPLOAD_NOT_CONFIRMED'
-            ? 'uploading-images'
-            : error.message === 'WECHAT_STYLE_NOT_CONFIRMED'
-              ? 'validating-write'
-              : error.message === 'WECHAT_EDITOR_CLEAR_NOT_CONFIRMED' ? 'clearing-editor' : 'write-failed',
+          phase: failurePhase,
           progress: {
-            phase: error.message === 'WECHAT_IMAGE_UPLOAD_NOT_CONFIRMED'
-              ? 'uploading-images'
-              : error.message === 'WECHAT_STYLE_NOT_CONFIRMED'
-                ? 'validating-write'
-                : error.message === 'WECHAT_EDITOR_CLEAR_NOT_CONFIRMED' ? 'clearing-editor' : 'write-failed',
-            percent: error.message === 'WECHAT_IMAGE_UPLOAD_NOT_CONFIRMED'
-              ? Math.min(99, Math.round(18 + 70 * ((error.result?.visibleHostedImageCount || 0) / Math.max(1, message.options?.expectedImageCount || 1))))
+            phase: failurePhase,
+            percent: isPreuploadFailure || isHostedImageFailure
+              ? Math.min(99, Math.round(73 * uploadedImageCount / Math.max(1, expectedUploadImageCount)))
               : 0,
-            message: error.message === 'WECHAT_IMAGE_UPLOAD_NOT_CONFIRMED'
-              ? `已有 ${error.result?.visibleHostedImageCount || 0} / ${message.options?.expectedImageCount || 0} 张图片完成托管`
+            message: isPreuploadFailure
+              ? `图片预上传失败（${uploadedImageCount} / ${expectedUploadImageCount}），当前公众号草稿未改动`
+              : isHostedImageFailure
+                ? `正文已保留，但仅确认 ${uploadedImageCount} / ${expectedUploadImageCount} 张微信图片`
               : error.message === 'WECHAT_STYLE_NOT_CONFIRMED'
                 ? '样式或结构校验失败，已尝试恢复原草稿'
               : error.message === 'WECHAT_EDITOR_CLEAR_NOT_CONFIRMED'
@@ -403,6 +406,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             bodyStyleCount: error.result?.bodyStyleCount || 0,
             editorCleared: error.result?.editorCleared ?? null,
             clearConfirmed: error.result?.clearConfirmed ?? null,
+            uploadedImageCount,
+            expectedUploadImageCount,
+            editorUntouched: error.result?.editorUntouched ?? false,
+            contentPreservedAfterFailure: error.result?.contentPreservedAfterFailure ?? false,
             rollbackPerformed: error.result?.rollbackPerformed ?? false,
             rollbackConfirmed: error.result?.rollbackConfirmed ?? null
           }

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Editor upload failure smoke test</title>
+  <style>.ProseMirror { width: 640px; min-height: 200px; }</style>
+</head>
+<body>
+  <div id="ueditor_0"><div class="ProseMirror" contenteditable="true"><p>Original draft sentinel</p></div></div>
+  <div data-save-status>已保存</div>
+  <pre id="output">RUNNING</pre>
+  <script src="../extension/editor-adapter.js"></script>
+  <script>
+    const editor = document.querySelector('.ProseMirror');
+    window.fetch = async () => new Response(JSON.stringify({
+      base_resp: { ret: -1, err_msg: 'mock upload failure' }
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+
+    const pixel = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL5WQAAAABJRU5ErkJggg==';
+    const article = `<section data-ifanr-template="smoke"><p>New article</p><img src="${pixel}"><p>New tail</p></section>`;
+    WechatEditorAdapter.injectHtml(article, {
+      expectedImageCount: 1,
+      expectedTextContains: 'New tail',
+      forceEditorReplace: true,
+      requireHostedImages: true,
+      wechatToken: 'smoke-token',
+      clickSaveAsDraft: false,
+      timeoutMs: 8000
+    }).then((result) => {
+      document.querySelector('#output').textContent = JSON.stringify({ pass: false, unexpectedResult: result });
+      document.title = 'FAIL';
+    }).catch((error) => {
+      const pass = error.message === 'WECHAT_CDN_UPLOAD_FAILED' &&
+        error.result?.editorUntouched === true &&
+        error.result?.rollbackPerformed === false &&
+        editor.textContent.trim() === 'Original draft sentinel' &&
+        !editor.textContent.includes('New article');
+      document.querySelector('#output').textContent = JSON.stringify({
+        pass,
+        error: error.message,
+        editorText: editor.textContent.trim(),
+        result: error.result || null
+      });
+      document.title = pass ? 'PASS' : 'FAIL';
+    });
+  </script>
+</body>
+</html>

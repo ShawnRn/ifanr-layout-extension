@@ -714,7 +714,9 @@
           sourceImageCount: Number(cachedPackage.imageCount || 0),
           expectedTextContains: cachedPackage.expectedTextTail || '',
           expectedMinimumTextLength: Number(cachedPackage.expectedMinimumTextLength || 0),
-          timeoutMs: 90000
+          wechatUploadConcurrency: 2,
+          wechatImageUploadTimeoutMs: 30000,
+          timeoutMs: 180000
         }
       }).catch(() => null);
 
@@ -732,15 +734,28 @@
       renderInjectionProgress({ percent: 100, message: '正文、图片和保存状态已确认', state: 'completed' });
     } catch (err) {
       console.error('WeChat inject error:', err);
+      const uploadedImageCount = Number(err.result?.uploadedImageCount || err.result?.wechatCdnImageCount || err.result?.confirmedStagedImageCount || 0);
+      const expectedUploadImageCount = Number(err.result?.expectedUploadImageCount || cachedPackage.imageCount || 0);
+      const editorUntouched = err.result?.editorUntouched === true;
+      const contentPreserved = err.result?.contentPreservedAfterFailure === true;
       renderInjectionProgress({
-        percent: Number(err.result?.confirmedStagedImageCount || 0) > 0
-          ? Math.round(88 * Number(err.result.confirmedStagedImageCount) / Math.max(1, Number(err.result.stagedImageCount || cachedPackage.imageCount || 1)))
+        percent: uploadedImageCount > 0
+          ? Math.round(73 * uploadedImageCount / Math.max(1, expectedUploadImageCount))
           : 0,
-        message: err.message || '公众号图片托管未完成',
+        message: editorUntouched
+          ? `图片预上传失败（${uploadedImageCount} / ${expectedUploadImageCount}），公众号草稿未改动`
+          : contentPreserved
+            ? '校验未完成，但已写入的正文和图片均已保留'
+            : (err.message || '公众号写入未完成'),
         state: 'failed'
       });
-      await copyWechat();
-      showToast('注入受阻，已为您自动复制排版富文本，直接粘贴即可！');
+      if (editorUntouched) {
+        showToast('图片上传受阻，公众号原草稿保持不变，请稍后重试');
+      } else if (contentPreserved) {
+        showToast('自动校验未完成，已保留当前正文，请在公众号页面检查');
+      } else {
+        showToast('注入受阻，未自动执行大体积剪贴板兜底');
+      }
     } finally {
       activeInjectionRequestId = null;
       if (mainInjectBtn) mainInjectBtn.disabled = false;

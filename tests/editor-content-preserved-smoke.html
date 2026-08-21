@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Editor preserve content smoke test</title>
+  <style>
+    .ProseMirror { width: 640px; min-height: 200px; }
+    img { display: block; width: 32px; height: 32px; }
+  </style>
+</head>
+<body>
+  <div id="ueditor_0"><div class="ProseMirror" contenteditable="true"><p>Original draft sentinel</p></div></div>
+  <pre id="output">RUNNING</pre>
+  <script src="../extension/editor-adapter.js"></script>
+  <script>
+    const editor = document.querySelector('.ProseMirror');
+    window.fetch = async () => new Response(JSON.stringify({
+      base_resp: { ret: 0 },
+      url: 'https://mmbiz.qpic.cn/mmbiz_png/preserve-smoke/640?wx_fmt=png'
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+
+    const pixel = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL5WQAAAABJRU5ErkJggg==';
+    const article = `<section data-ifanr-template="smoke"><p>New article body</p><img src="${pixel}"><p>New tail sentinel</p></section>`;
+    WechatEditorAdapter.injectHtml(article, {
+      expectedImageCount: 1,
+      expectedTextContains: 'New tail sentinel',
+      expectedMinimumTextLength: 20,
+      forceEditorReplace: true,
+      requireHostedImages: true,
+      wechatToken: 'smoke-token',
+      clickSaveAsDraft: false,
+      saveStallTimeoutMs: 300,
+      timeoutMs: 5000
+    }).then((result) => {
+      document.querySelector('#output').textContent = JSON.stringify({ pass: false, unexpectedResult: result });
+      document.title = 'FAIL';
+    }).catch((error) => {
+      const editorText = editor.textContent.trim();
+      const pass = error.message === 'WECHAT_SAVE_NOT_CONFIRMED' &&
+        error.result?.contentPreservedAfterFailure === true &&
+        error.result?.rollbackPerformed === false &&
+        editorText.includes('New article body') &&
+        editorText.includes('New tail sentinel') &&
+        !editorText.includes('Original draft sentinel') &&
+        editor.querySelectorAll('img[src*="mmbiz.qpic.cn"]').length === 1;
+      document.querySelector('#output').textContent = JSON.stringify({
+        pass,
+        error: error.message,
+        editorText,
+        result: error.result || null
+      });
+      document.title = pass ? 'PASS' : 'FAIL';
+    });
+  </script>
+</body>
+</html>

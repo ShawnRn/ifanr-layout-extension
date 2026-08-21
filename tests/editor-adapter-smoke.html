@@ -15,23 +15,28 @@
   <script src="../extension/editor-adapter.js"></script>
   <script>
     const editor = document.querySelector('.ProseMirror');
-    const hostedImage = 'http://127.0.0.1:18765/extension/icons/icon16.png';
-    editor.addEventListener('paste', (event) => {
-      event.preventDefault();
-      document.execCommand('insertHTML', false, event.clipboardData.getData('text/html'));
-      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste' }));
-    });
-    editor.addEventListener('input', () => {
-      for (const image of editor.querySelectorAll('img[src^="data:image/"]')) {
-        image.src = hostedImage;
+    let uploadCount = 0;
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      if (String(input).includes('/cgi-bin/filetransfer')) {
+        uploadCount += 1;
+        return new Response(JSON.stringify({
+          base_resp: { ret: 0 },
+          url: `https://mmbiz.qpic.cn/mmbiz_png/smoke-${uploadCount}/640?wx_fmt=png`
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
-    });
+      return originalFetch(input, init);
+    };
 
-    const pixel = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL5WQAAAABJRU5ErkJggg==';
+    const pixelBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL5WQAAAABJRU5ErkJggg==';
+    const pixelBinary = atob(pixelBase64);
     const imageCount = 15;
-    const images = Array.from({ length: imageCount }, (_, index) =>
-      `<section style="margin:24px 0"><img src="${pixel}" alt="image-${index + 1}" style="display:block;width:32px;height:32px"></section>`
-    ).join('');
+    const images = Array.from({ length: imageCount }, (_, index) => {
+      // Give every image a distinct payload so the smoke test exercises the
+      // bounded upload queue instead of source de-duplication.
+      const pixel = `data:image/png;base64,${btoa(pixelBinary + String.fromCharCode(index))}`;
+      return `<section style="margin:24px 0"><img src="${pixel}" alt="image-${index + 1}" style="display:block;width:32px;height:32px"></section>`;
+    }).join('');
     const article = `
       <section data-ifanr-template="smoke">
         <section data-ifanr-block="paragraph" data-ifanr-style-role="body" style="margin:0 16px 24px;color:#222222;font-size:15px;line-height:1.8;">Alpha</section>
@@ -46,25 +51,30 @@
       expectedMinimumTextLength: 20,
       forceEditorReplace: true,
       requireHostedImages: true,
+      wechatToken: 'smoke-token',
+      wechatUploadConcurrency: 2,
       clickSaveAsDraft: false,
       imageUploadBatchSize: 3,
       imageBatchTimeoutMs: 2000,
       imageStallTimeoutMs: 2000,
       saveTimeoutMs: 6000,
-      timeoutMs: 8000
+      timeoutMs: 12000
     }).then((result) => {
       const pass = result.confirmedStagedImageCount === imageCount &&
         result.pendingEmbeddedImageCount === 0 &&
         result.imageUploadConfirmed === true &&
         result.saved === true &&
         result.minimumTextLengthConfirmed === true &&
-        result.injectionMethod.includes('single-rich-text-paste') &&
-        result.injectionMethod.includes('atomic-full-article');
+        result.wechatCdnImageCount === imageCount &&
+        uploadCount === imageCount &&
+        result.injectionMethod.includes('wechat-cdn-preupload') &&
+        result.injectionMethod.includes('atomic-lightweight-html');
       document.querySelector('#output').textContent = JSON.stringify({
         pass,
         confirmed: result.confirmedStagedImageCount,
         pending: result.pendingEmbeddedImageCount,
         batches: result.imageUploadBatchCount,
+        uploadCount,
         injectionMethod: result.injectionMethod,
         saved: result.saved
       });

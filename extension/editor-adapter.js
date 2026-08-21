@@ -335,13 +335,16 @@
       };
     });
     const pendingKinds = new Set(['data', 'blob', 'extension', 'relative', 'invalid']);
-    const pendingImages = details.filter((item) => pendingKinds.has(item.kind) || (item.order && !item.loaded));
+    const pendingImages = details.filter((item) => pendingKinds.has(item.kind));
     const visibleHostedImages = details.filter((item) => item.visible && item.loaded && !pendingKinds.has(item.kind));
+    const wechatCdnImages = details.filter((item) => /(^|\.)mmbiz\.qpic\.cn$/i.test(item.kind));
     return {
       imageCount: images.length,
       visibleImageCount: details.filter((item) => item.visible).length,
       visibleHostedImageCount: visibleHostedImages.length,
       hostedImageCount: details.filter((item) => item.loaded && !pendingKinds.has(item.kind)).length,
+      wechatCdnImageCount: wechatCdnImages.length,
+      unloadedHostedImageCount: details.filter((item) => !pendingKinds.has(item.kind) && !item.loaded).length,
       imageSourceKinds: details.map((item) => item.kind),
       imageSourceDetails: details,
       pendingEmbeddedImageCount: pendingImages.length,
@@ -492,14 +495,18 @@
     return { html: template.innerHTML, refreshedBlockCount, movedIntoArticleCount };
   }
 
-  function expectedLayoutStyles(html) {
-    const template = document.createElement('template');
-    template.innerHTML = html;
+  function expectedLayoutStyles(htmlOrTemplate) {
+    let root = htmlOrTemplate?.content || htmlOrTemplate;
+    if (!root?.querySelectorAll) {
+      const template = document.createElement('template');
+      template.innerHTML = String(htmlOrTemplate || '');
+      root = template.content;
+    }
     return {
-      headingCount: template.content.querySelectorAll('[data-ifanr-block="heading"]').length,
-      bodyCount: template.content.querySelectorAll('[data-ifanr-block="paragraph"]').length,
-      quoteCount: template.content.querySelectorAll('[data-ifanr-block="quote"]').length,
-      rootCount: template.content.querySelectorAll('[data-ifanr-template]').length
+      headingCount: root.querySelectorAll('[data-ifanr-block="heading"]').length,
+      bodyCount: root.querySelectorAll('[data-ifanr-block="paragraph"]').length,
+      quoteCount: root.querySelectorAll('[data-ifanr-block="quote"]').length,
+      rootCount: root.querySelectorAll('[data-ifanr-template]').length
     };
   }
 
@@ -796,6 +803,135 @@
       : `single-paste-ignored+${replaceEditorHtml(editor, html)}`;
   }
 
+  function dataUriToBlob(dataUri) {
+    const match = String(dataUri || '').match(/^data:(image\/(?:jpeg|png|gif|webp));base64,(.+)$/i);
+    if (!match) throw new Error('WECHAT_IMAGE_DATA_URI_INVALID');
+    const binary = global.atob(match[2]);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return new Blob([bytes], { type: match[1].toLowerCase() });
+  }
+
+  function findWechatCdnUrl(value, visited = new Set()) {
+    if (typeof value === 'string') return /https?:\/\/[^"'\s]*mmbiz\.qpic\.cn\//i.test(value) ? value : null;
+    if (!value || typeof value !== 'object' || visited.has(value)) return null;
+    visited.add(value);
+    for (const nested of Object.values(value)) {
+      const found = findWechatCdnUrl(nested, visited);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  async function uploadBlobToWechatCdn(blob, filename, token, options = {}) {
+    const endpoint = options.wechatUploadEndpoint ||
+      `https://mp.weixin.qq.com/cgi-bin/filetransfer?action=upload_material&f=json&writetype=doublewrite&has_preview=1&token=${encodeURIComponent(token)}&lang=zh_CN`;
+    const fieldNames = ['uploadfile', 'file', 'media'];
+    let lastError = null;
+    for (const fieldName of fieldNames) {
+      try {
+        const file = new File([blob], filename, { type: blob.type || 'image/png' });
+        const formData = new FormData();
+        // Send one file field per attempt. Lark2Pad historically sent all three
+        // aliases together, tripling the request body for large PNGs.
+        formData.append(fieldName, file, filename);
+        const uploadTimeoutMs = Number(options.wechatImageUploadTimeoutMs || 30000);
+        const uploadSignal = typeof global.AbortSignal?.timeout === 'function'
+          ? global.AbortSignal.timeout(uploadTimeoutMs)
+          : undefined;
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          body: formData,
+          credentials: 'include',
+          signal: uploadSignal
+        });
+        if (!response.ok) throw new Error(`WECHAT_CDN_UPLOAD_HTTP_${response.status}`);
+        const text = await response.text();
+        const payload = JSON.parse(text);
+        if (Number(payload?.base_resp?.ret || 0) !== 0) {
+          throw new Error(`WECHAT_CDN_UPLOAD_RET_${payload?.base_resp?.ret ?? 'UNKNOWN'}`);
+        }
+        const cdnUrl = findWechatCdnUrl(payload);
+        if (!cdnUrl) throw new Error('WECHAT_CDN_URL_NOT_FOUND');
+        return cdnUrl;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new Error('WECHAT_CDN_UPLOAD_FAILED');
+  }
+
+  async function hostTemplateImagesOnWechat(template, options, deadlineAt) {
+    const images = [...template.content.querySelectorAll('img')];
+    const embeddedImages = images.filter((image) => /^data:image\/(?:jpeg|png|gif|webp);base64,/i.test(image.getAttribute('src') || ''));
+    const uniqueSources = [...new Set(embeddedImages.map((image) => image.getAttribute('src')).filter(Boolean))];
+    if (uniqueSources.length === 0) {
+      return { imageCount: images.length, uploadedImageCount: 0, uploadedBytes: 0, html: template.innerHTML };
+    }
+    const token = String(options.wechatToken || new URL(location.href).searchParams.get('token') || '');
+    if (!token) throw new Error('WECHAT_TOKEN_NOT_FOUND');
+
+    const mappings = new Map();
+    const concurrency = Math.max(1, Math.min(3, Number(options.wechatUploadConcurrency || 2)));
+    let cursor = 0;
+    let completed = 0;
+    let uploadedBytes = 0;
+    let firstError = null;
+    const worker = async () => {
+      while (!firstError) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= uniqueSources.length) return;
+        if (Date.now() >= deadlineAt) {
+          firstError = new Error('WECHAT_CDN_UPLOAD_TIMEOUT');
+          return;
+        }
+        const source = uniqueSources[index];
+        try {
+          const blob = dataUriToBlob(source);
+          const extension = blob.type.includes('gif') ? 'gif' : blob.type.includes('jpeg') ? 'jpg' : blob.type.includes('webp') ? 'webp' : 'png';
+          const filename = `lark2pad_${Date.now()}_${index + 1}.${extension}`;
+          const cdnUrl = await uploadBlobToWechatCdn(blob, filename, token, options);
+          mappings.set(source, cdnUrl);
+          uploadedBytes += blob.size;
+          completed += 1;
+          await emitProgress(options, {
+            phase: 'uploading-images',
+            percent: 5 + Math.round(68 * completed / Math.max(1, uniqueSources.length)),
+            message: `正在预先上传图片到微信 CDN：${completed} / ${uniqueSources.length}`
+          });
+        } catch (error) {
+          firstError = error;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, uniqueSources.length) }, () => worker()));
+    if (firstError || mappings.size !== uniqueSources.length) {
+      throw Object.assign(new Error('WECHAT_CDN_UPLOAD_FAILED'), {
+        cause: firstError,
+        result: {
+          uploadedImageCount: mappings.size,
+          expectedUploadImageCount: uniqueSources.length,
+          editorUntouched: true,
+          uploadError: firstError?.message || 'UNKNOWN'
+        }
+      });
+    }
+
+    for (const image of embeddedImages) {
+      const cdnUrl = mappings.get(image.getAttribute('src'));
+      if (!cdnUrl) continue;
+      image.setAttribute('src', cdnUrl);
+      image.setAttribute('data-src', cdnUrl);
+    }
+    return {
+      imageCount: images.length,
+      uploadedImageCount: uniqueSources.length,
+      uploadedBytes,
+      html: template.innerHTML
+    };
+  }
+
   async function refreshManualFormatting(options = {}) {
     const editorSelection = findWechatEditor(options.editorSelectors || DEFAULT_EDITOR_SELECTORS);
     const editor = editorSelection.editor;
@@ -1067,7 +1203,7 @@
 
   async function injectHtmlAtomic(html, options = {}) {
     const startedAt = Date.now();
-    const timeoutMs = Number(options.timeoutMs || 90000);
+    const timeoutMs = Number(options.timeoutMs || 180000);
     const deadlineAt = startedAt + timeoutMs;
     await emitProgress(options, { phase: 'preparing-write', percent: 2, message: '正在确认公众号编辑器' });
     const editorSelection = findWechatEditor(options.editorSelectors || DEFAULT_EDITOR_SELECTORS);
@@ -1080,11 +1216,15 @@
     };
     const previousHtml = editor.innerHTML;
     const previousText = editor.innerText || editor.textContent || '';
-    const sanitizedHtml = sanitizeArticleHtml(html);
-    const expectedStyles = expectedLayoutStyles(sanitizedHtml);
-    const embeddedMatches = String(sanitizedHtml).match(/data:image\/(?:jpeg|png|gif|webp);base64,[^"']+/gi) || [];
-    const extractedEmbeddedPayloadBytes = embeddedMatches.reduce((total, value) => total + value.length, 0);
-    const expectedImageCount = Number(options.expectedImageCount || embeddedMatches.length || 0);
+    const sanitizedTemplate = sanitizeArticleTemplate(html);
+    html = '';
+    const expectedStyles = expectedLayoutStyles(sanitizedTemplate);
+    const templateImages = [...sanitizedTemplate.content.querySelectorAll('img')];
+    const embeddedSources = templateImages
+      .map((image) => image.getAttribute('src') || '')
+      .filter((source) => /^data:image\/(?:jpeg|png|gif|webp);base64,/i.test(source));
+    const extractedEmbeddedPayloadBytes = embeddedSources.reduce((total, value) => total + value.length, 0);
+    const expectedImageCount = templateImages.length || Number(options.expectedImageCount || 0);
     const forcedReplacement = options.forceEditorReplace !== false;
     const failWithRollback = (code, result = {}, cause = null) => {
       const rollbackConfirmed = restoreEditorSnapshot(editor, previousHtml);
@@ -1103,7 +1243,36 @@
       });
     };
 
-    await emitProgress(options, { phase: 'clearing-editor', percent: 6, message: '正在备份并清空原草稿' });
+    // Upload every embedded image before touching the editor. The old v1.11
+    // path inserted all Base64 payloads at once, which freezes Chrome and then
+    // rolls the entire draft back when WeChat's hosting queue stalls.
+    let hostedTemplate;
+    try {
+      await emitProgress(options, {
+        phase: 'uploading-images',
+        percent: 5,
+        message: `正在预先上传 ${embeddedSources.length} 张图片到微信 CDN，当前草稿保持不变`
+      });
+      hostedTemplate = await hostTemplateImagesOnWechat(sanitizedTemplate, options, deadlineAt);
+    } catch (error) {
+      throw Object.assign(new Error(error?.message === 'WECHAT_TOKEN_NOT_FOUND' ? 'WECHAT_TOKEN_NOT_FOUND' : 'WECHAT_CDN_UPLOAD_FAILED'), {
+        cause: error,
+        result: {
+          editorUntouched: true,
+          rollbackPerformed: false,
+          rollbackConfirmed: null,
+          previousHtmlLength: previousHtml.length,
+          previousTextLength: previousText.trim().length,
+          previousTextHash: textHash(previousText.trim()),
+          expectedImageCount,
+          ...(error?.result || {})
+        }
+      });
+    }
+    const sanitizedHtml = hostedTemplate.html;
+    sanitizedTemplate.innerHTML = '';
+
+    await emitProgress(options, { phase: 'clearing-editor', percent: 78, message: '图片已全部进入微信 CDN，正在备份并替换原草稿' });
     const clearResult = await clearEditorState(editor);
     if (!clearResult.confirmed && !forcedReplacement) {
       return failWithRollback('WECHAT_EDITOR_CLEAR_NOT_CONFIRMED', {
@@ -1117,11 +1286,13 @@
     try {
       await emitProgress(options, {
         phase: 'inserting-content',
-        percent: 10,
-        message: `正在一次写入完整正文和 ${expectedImageCount} 张已压缩图片`
+        percent: 82,
+        message: `正在写入轻量正文和 ${expectedImageCount} 张微信 CDN 图片`
       });
       await wait(0);
-      injectionMethod = await pasteFullArticleOnce(editor, sanitizedHtml, forcedReplacement);
+      injectionMethod = forcedReplacement
+        ? forceReplaceEditorHtml(editor, sanitizedHtml)
+        : replaceEditorHtml(editor, sanitizedHtml);
       await wait(240);
     } catch (error) {
       return failWithRollback('WECHAT_INSERTION_FAILED', {
@@ -1136,7 +1307,7 @@
     let quoteDecorationFixCount = normalizeQuoteDecorations(editor);
     if (quoteDuplicateRemovalCount || quoteDecorationFixCount) await wait(80);
     let styleInspection = inspectLayoutStyles(editor, expectedStyles);
-    await emitProgress(options, { phase: 'filling-metadata', percent: 14, message: '完整正文已写入，正在填写标题和摘要' });
+    await emitProgress(options, { phase: 'filling-metadata', percent: 86, message: '完整正文已写入，正在填写标题和摘要' });
     const metadataResult = await fillArticleMetadata(editor, options);
 
     const saveSelectors = options.saveSelectors || DEFAULT_SAVE_SELECTORS;
@@ -1159,14 +1330,14 @@
       if (!currentSaveText) observedUnsavedState = true;
       if (currentSaveText && (observedUnsavedState || Date.now() - startedAt > 1200)) saveText = currentSaveText;
       imageInspection = inspectImages(editor);
-      const hostedCount = imageInspection.visibleHostedImageCount;
+      const hostedCount = imageInspection.wechatCdnImageCount;
       if (hostedCount > lastHostedCount) {
         lastHostedCount = hostedCount;
         lastImageProgressAt = Date.now();
       }
       const imagesConfirmed = expectedImageCount === 0 || (
         imageInspection.imageCount >= expectedImageCount &&
-        imageInspection.visibleHostedImageCount >= expectedImageCount &&
+        imageInspection.wechatCdnImageCount >= expectedImageCount &&
         imageInspection.pendingEmbeddedImageCount === 0
       );
       if (imagesConfirmed && imagesConfirmedAt == null) imagesConfirmedAt = Date.now();
@@ -1227,14 +1398,14 @@
     const replacementConfirmed = baseValidation.replacementConfirmed && minimumTextLengthConfirmed;
     const imageUploadConfirmed = expectedImageCount === 0 ? null : (
       imageInspection.imageCount >= expectedImageCount &&
-      imageInspection.visibleHostedImageCount >= expectedImageCount &&
+      imageInspection.wechatCdnImageCount >= expectedImageCount &&
       imageInspection.pendingEmbeddedImageCount === 0
     );
     const pendingImageOrders = imageInspection.pendingImageOrders || [];
     const result = {
       ok: Boolean(saveText) && replacementConfirmed && (!options.requireHostedImages || imageUploadConfirmed !== false),
       injected: true,
-      injectionMethod: `${injectionMethod}+atomic-full-article`,
+      injectionMethod: `${injectionMethod}+wechat-cdn-preupload+atomic-lightweight-html`,
       replacementConfirmed,
       expectedTextFound: baseValidation.expectedTextFound,
       minimumTextLengthConfirmed,
@@ -1272,20 +1443,23 @@
       visibleImageCount: imageInspection.visibleImageCount,
       visibleHostedImageCount: imageInspection.visibleHostedImageCount,
       hostedImageCount: imageInspection.hostedImageCount,
+      wechatCdnImageCount: imageInspection.wechatCdnImageCount,
+      unloadedHostedImageCount: imageInspection.unloadedHostedImageCount,
       imageSourceKinds: imageInspection.imageSourceKinds,
       imageSourceDetails: imageInspection.imageSourceDetails,
       pendingEmbeddedImageCount: imageInspection.pendingEmbeddedImageCount,
       pendingImageOrders,
       pendingImageNames: imageInspection.pendingImageNames || [],
       pendingAnimatedImageCount: imageInspection.pendingAnimatedImageCount,
-      stagedImageCount: expectedImageCount,
+      stagedImageCount: hostedTemplate.uploadedImageCount,
       stagedAnimatedImageCount: 0,
-      extractedEmbeddedImageCount: embeddedMatches.length,
+      extractedEmbeddedImageCount: embeddedSources.length,
       extractedEmbeddedPayloadBytes,
+      uploadedImageBytes: hostedTemplate.uploadedBytes,
       initiallyHostedImageCount: 0,
-      confirmedStagedImageCount: imageInspection.visibleHostedImageCount,
-      imageUploadBatchSize: 0,
-      imageUploadBatchCount: expectedImageCount ? 1 : 0,
+      confirmedStagedImageCount: imageInspection.wechatCdnImageCount,
+      imageUploadBatchSize: Math.max(1, Math.min(3, Number(options.wechatUploadConcurrency || 2))),
+      imageUploadBatchCount: hostedTemplate.uploadedImageCount,
       stagedImageUploadAttempts: [],
       manualImagePlaceholderCount: Number(options.manualImageReplacements?.length || 0),
       manualImageOrders: (options.manualImageReplacements || []).map((item) => item.order),
@@ -1302,9 +1476,15 @@
 
     if (!replacementConfirmed) return failWithRollback('WECHAT_REPLACEMENT_NOT_CONFIRMED', result);
     if (options.requireHostedImages && imageUploadConfirmed !== true && expectedImageCount > 0) {
-      return failWithRollback('WECHAT_IMAGE_UPLOAD_NOT_CONFIRMED', result);
+      throw Object.assign(new Error('WECHAT_IMAGE_UPLOAD_NOT_CONFIRMED'), {
+        result: { ...result, rollbackPerformed: false, rollbackConfirmed: null, contentPreservedAfterFailure: true }
+      });
     }
-    if (!result.saved) return failWithRollback('WECHAT_SAVE_NOT_CONFIRMED', result);
+    if (!result.saved) {
+      throw Object.assign(new Error('WECHAT_SAVE_NOT_CONFIRMED'), {
+        result: { ...result, rollbackPerformed: false, rollbackConfirmed: null, contentPreservedAfterFailure: true }
+      });
+    }
     await emitProgress(options, { phase: 'write-completed', percent: 100, message: '全文、全部图片和自动保存均已确认' });
     return result;
   }
