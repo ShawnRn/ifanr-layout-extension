@@ -690,72 +690,75 @@ async function captureCurrentFeishuPage(message) {
 function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', originSrc = '') {
   if (!src && !token && !originSrc) return [];
   const candidates = [];
-  const host = location.host.includes('feishu.cn') ? location.host : 'internal-api-drive-stream.feishu.cn';
 
-  // 1. 基于 Token 构造官方最高清全尺寸原图地址 (preview_type=1: 官方无损全分辨率原图; preview_type=15: 4K 极清原图)
-  if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
-    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=1`);
-    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=15`);
-    candidates.push(`https://${host}/space/api/box/stream/download/all/${token}/`);
-    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/`);
-  }
-
-  // 2. 针对 Drive API 的现有 URL 替换为全尺寸原图参数
   const baseSrc = originSrc || src;
+  let driveHost = 'internal-api-drive-stream.feishu.cn';
+  let tokenFromUrl = token;
+
   if (baseSrc && !baseSrc.startsWith('data:')) {
     try {
       const u = new URL(baseSrc, location.href);
-      if (u.hostname.includes('feishu.cn') || u.hostname.includes('feishucdn.com')) {
-        // 提取已包含的 token
-        const tokenMatch = baseSrc.match(/box[a-zA-Z0-9]{15,}/);
-        if (tokenMatch && tokenMatch[0]) {
-          candidates.push(`https://${host}/space/api/box/stream/download/preview/${tokenMatch[0]}/?preview_type=1`);
-          candidates.push(`https://${host}/space/api/box/stream/download/preview/${tokenMatch[0]}/?preview_type=15`);
-          candidates.push(`https://${host}/space/api/box/stream/download/all/${tokenMatch[0]}/`);
-        }
-
-        // preview_type=1 无损原图
-        const u1 = new URL(baseSrc, location.href);
-        u1.searchParams.set('preview_type', '1');
-        u1.searchParams.delete('width');
-        u1.searchParams.delete('height');
-        u1.searchParams.delete('size');
-        u1.searchParams.delete('rule');
-        candidates.push(u1.toString());
-
-        // preview_type=15 4K 超清
-        const u15 = new URL(baseSrc, location.href);
-        u15.searchParams.set('preview_type', '15');
-        u15.searchParams.delete('width');
-        u15.searchParams.delete('height');
-        u15.searchParams.delete('size');
-        u15.searchParams.delete('rule');
-        candidates.push(u15.toString());
-
-        // 原始流（移除 preview_type 与所有宽高尺寸限制）
-        const uRaw = new URL(baseSrc, location.href);
-        uRaw.searchParams.delete('preview_type');
-        uRaw.searchParams.delete('width');
-        uRaw.searchParams.delete('height');
-        uRaw.searchParams.delete('size');
-        uRaw.searchParams.delete('rule');
-        candidates.push(uRaw.toString());
+      if (u.hostname.includes('drive-stream') || u.hostname.includes('feishu.cn')) {
+        driveHost = u.hostname;
       }
+      const match = baseSrc.match(/box[a-zA-Z0-9]{15,}/);
+      if (match && match[0]) {
+        tokenFromUrl = match[0];
+      }
+
+      // 1. 无损全尺寸原图 preview_type=1
+      const u1 = new URL(baseSrc, location.href);
+      u1.searchParams.set('preview_type', '1');
+      u1.searchParams.delete('width');
+      u1.searchParams.delete('height');
+      u1.searchParams.delete('size');
+      u1.searchParams.delete('rule');
+      candidates.push(u1.toString());
+
+      // 2. 4K 极清 preview_type=15
+      const u15 = new URL(baseSrc, location.href);
+      u15.searchParams.set('preview_type', '15');
+      u15.searchParams.delete('width');
+      u15.searchParams.delete('height');
+      u15.searchParams.delete('size');
+      u15.searchParams.delete('rule');
+      candidates.push(u15.toString());
+
+      // 3. 原始数据流（移除所有尺寸和预览参数）
+      const uRaw = new URL(baseSrc, location.href);
+      uRaw.searchParams.delete('preview_type');
+      uRaw.searchParams.delete('width');
+      uRaw.searchParams.delete('height');
+      uRaw.searchParams.delete('size');
+      uRaw.searchParams.delete('rule');
+      candidates.push(uRaw.toString());
     } catch {}
   }
 
-  // 3. 显式原图属性
+  const effectiveToken = token || tokenFromUrl;
+  if (effectiveToken && (effectiveToken.startsWith('boxcn') || effectiveToken.startsWith('box'))) {
+    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${effectiveToken}/?preview_type=1`);
+    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${effectiveToken}/?preview_type=15`);
+    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${effectiveToken}/`);
+    candidates.push(`https://${driveHost}/space/api/box/stream/download/all/${effectiveToken}/`);
+    if (driveHost !== 'internal-api-drive-stream.feishu.cn') {
+      candidates.push(`https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${effectiveToken}/?preview_type=1`);
+      candidates.push(`https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${effectiveToken}/?preview_type=15`);
+    }
+  }
+
+  // 4. 显式原图属性
   if (originSrc && !originSrc.startsWith('data:') && originSrc !== src) {
     candidates.push(originSrc);
   }
 
-  // 4. 解析 srcset 中最大尺寸的原图
+  // 5. 解析 srcset
   if (srcset) {
     const entries = srcset.split(',').map((s) => s.trim().split(/\s+/)[0]).filter(Boolean);
     candidates.push(...entries.reverse());
   }
 
-  // 5. 兜底原始地址 (内联预览图)
+  // 6. 兜底原始地址 (内联预览图)
   if (src && !src.startsWith('data:')) candidates.push(src);
 
   return [...new Set(candidates.filter(Boolean))];
@@ -874,8 +877,7 @@ async function extractFeishuDocDirect() {
 
       // 构造全尺寸高清原图 URL 给 Pad
       if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
-        const host = location.host.includes('feishu.cn') ? location.host : 'internal-api-drive-stream.feishu.cn';
-        block.image.originSrc = `https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=1`;
+        block.image.originSrc = `https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${token}/?preview_type=1`;
       } else if (!block.image.originSrc) {
         block.image.originSrc = src;
       }

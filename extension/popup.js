@@ -80,18 +80,65 @@
     if (statusMsg) statusMsg.textContent = message;
   }
 
-  function showBadgeSuccess() {
+  async function showBadgeSuccess() {
     try {
       if (chrome.action?.setBadgeText) {
-        chrome.action.setBadgeText({ text: '✓' });
-        if (chrome.action.setBadgeBackgroundColor) {
-          chrome.action.setBadgeBackgroundColor({ color: '#07C160' });
-        }
-        if (chrome.action.setBadgeTextColor) {
-          chrome.action.setBadgeTextColor({ color: '#FFFFFF' });
-        }
+        chrome.action.setBadgeText({ text: '' });
       }
-    } catch {}
+
+      if (!chrome.action?.setIcon) return;
+
+      const img = new Image();
+      img.src = 'icons/icon32.png';
+      await new Promise((resolve) => {
+        if (img.complete) resolve();
+        else {
+          img.onload = resolve;
+          img.onerror = resolve;
+        }
+      });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 32;
+      canvas.height = 32;
+      const ctx = canvas.getContext('2d');
+
+      // 1. 绘制原始 32x32 基础图标
+      if (img.naturalWidth) {
+        ctx.drawImage(img, 0, 0, 32, 32);
+      }
+
+      // 2. 在右下角绘制纯圆绿色微章（带白色微外边框防底色干扰）
+      const cx = 22.5;
+      const cy = 22.5;
+      const r = 7.5;
+
+      ctx.fillStyle = '#FFFFFF';
+      ctx.beginPath();
+      ctx.arc(cx, cy, r + 1.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#07C160';
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 3. 在圆形正中心绘制精致居中的白色对勾 (Checkmark)
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 1.8;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(cx - 3.4, cy + 0.1);
+      ctx.lineTo(cx - 1.0, cy + 2.5);
+      ctx.lineTo(cx + 3.4, cy - 2.2);
+      ctx.stroke();
+
+      const imageData = ctx.getImageData(0, 0, 32, 32);
+      chrome.action.setIcon({ imageData: { 32: imageData } });
+    } catch (e) {
+      console.warn('showBadgeSuccess error:', e);
+    }
   }
 
   function clearBadge() {
@@ -99,7 +146,19 @@
       if (chrome.action?.setBadgeText) {
         chrome.action.setBadgeText({ text: '' });
       }
-    } catch {}
+      if (chrome.action?.setIcon) {
+        chrome.action.setIcon({
+          path: {
+            16: 'icons/icon16.png',
+            32: 'icons/icon32.png',
+            48: 'icons/icon48.png',
+            128: 'icons/icon128.png'
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('clearBadge error:', e);
+    }
   }
 
   function showResult(title, copy, tone = 'neutral') {
