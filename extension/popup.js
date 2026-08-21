@@ -559,7 +559,9 @@
     await saveSettings();
     if (cachedPackage) {
       await performConversion(cachedPackage.markdown || cachedPackage.wechatHtml, cachedPackage.title, cachedPackage.sourceUrl);
-      showToast('已更新图片圆角设置');
+      showToast(roundImagesToggle.checked ? '已开启图片 2% 连续圆角' : '已关闭图片圆角（直角直出）');
+    } else {
+      showToast(roundImagesToggle.checked ? '图片圆角已开启' : '图片圆角已关闭');
     }
   });
 

@@ -196,6 +196,57 @@
       color: var(--ink);
     }
 
+    /* Quick Settings Bar in Fixed Top (0-Scroll) */
+    .quick-settings-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+      padding-top: 7px;
+      border-top: 1px dashed rgba(232, 222, 210, 0.9);
+    }
+    .setting-chip {
+      flex: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      min-height: 26px;
+      padding: 2px 6px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.85);
+      color: var(--ink);
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      user-select: none;
+      transition: all .15s ease;
+      white-space: nowrap;
+    }
+    .setting-chip:hover {
+      background: #FFFFFF;
+      border-color: #DCCEC0;
+    }
+    .setting-chip input[type="checkbox"] {
+      accent-color: var(--brand);
+      margin: 0;
+      width: 13px;
+      height: 13px;
+      cursor: pointer;
+    }
+    .setting-chip-select {
+      flex: 1;
+      min-height: 26px;
+      padding: 2px 6px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.85);
+      color: var(--ink);
+      font-size: 11px;
+      cursor: pointer;
+    }
+
     /* Scrollable Body Area */
     .scroll-body {
       flex: 1;
@@ -234,32 +285,6 @@
     .metric span { display: block; color: var(--muted); font-size: 10px; }
     .metric strong { display: block; margin-top: 1px; font-size: 12px; font-weight: 600; }
 
-    .quality-card { padding: 9px 12px; }
-    .quality-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    .quality-row + .quality-row { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
-    .quality-copy strong { display: block; font-size: 12px; font-weight: 600; }
-    .quality-copy span { display: block; margin-top: 1px; color: var(--muted); font-size: 10px; }
-    .quality-select {
-      flex: none;
-      min-height: 28px;
-      padding: 2px 20px 2px 6px;
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      color: var(--ink);
-      background: #FFF;
-      font-size: 11px;
-    }
-    .quality-toggle {
-      flex: none;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      color: var(--muted);
-      font-size: 11px;
-      cursor: pointer;
-    }
-    .quality-toggle input { accent-color: var(--brand); }
-
     .result-card { margin-top: 6px; }
     .result-card[data-tone="success"] { border-color: #CBE4D6; background: var(--success-bg); }
     .result-card[data-tone="warning"] { border-color: #EED6B5; background: var(--warning-bg); }
@@ -291,7 +316,7 @@
   </style>
 </head>
 <body>
-  <!-- Fixed Top Area (0-Scroll Actions) -->
+  <!-- Fixed Top Area (0-Scroll Actions & Quick Settings) -->
   <div class="sticky-top">
     <header class="app-header">
       <img class="brand-mark" src="icons/icon48.png" alt="爱范儿">
@@ -335,6 +360,23 @@
       </button>
       <button id="clear-btn" class="btn-utility" type="button">清除</button>
     </div>
+
+    <!-- 快速配置栏 (首屏直出，0 滚动开关) -->
+    <div class="quick-settings-bar">
+      <label class="setting-chip" title="开启后图片赋予 2% 连续圆角 (8px)，关闭则直角直出">
+        <input id="round-images" type="checkbox" checked>
+        <span>图片圆角</span>
+      </label>
+      <label class="setting-chip" title="自动插入顶部与底部品牌 Banner">
+        <input id="auto-banners" type="checkbox" checked>
+        <span>品牌 Banner</span>
+      </label>
+      <select id="title-image-brand" class="setting-chip-select" aria-label="文章题图品牌">
+        <option value="auto" selected>自动品牌</option>
+        <option value="ifanr">爱范儿</option>
+        <option value="appso">AppSo</option>
+      </select>
+    </div>
   </div>
 
   <!-- Scrollable Options & Details Area -->
@@ -353,38 +395,6 @@
       <div class="metric"><span>内容块</span><strong id="metric-blocks">—</strong></div>
       <div class="metric"><span>图片</span><strong id="metric-images">—</strong></div>
       <div class="metric"><span>题图品牌</span><strong id="metric-brand">爱范儿</strong></div>
-    </section>
-
-    <section class="card quality-card">
-      <div class="quality-row">
-        <div class="quality-copy">
-          <strong>文章题图</strong>
-          <span>自动识别 AppSo / 爱范儿</span>
-        </div>
-        <select id="title-image-brand" class="quality-select" aria-label="文章题图品牌">
-          <option value="auto" selected>自动</option>
-          <option value="ifanr">爱范儿</option>
-          <option value="appso">AppSo</option>
-        </select>
-      </div>
-      <div class="quality-row">
-        <div class="quality-copy">
-          <strong>图片圆角</strong>
-          <span>静态图 2% 连续圆角 (Lark2Pad 标准)</span>
-        </div>
-        <label class="quality-toggle">
-          <input id="round-images" type="checkbox" checked> 开启
-        </label>
-      </div>
-      <div class="quality-row">
-        <div class="quality-copy">
-          <strong>顶部 / 底部 Banner</strong>
-          <span>自动插入品牌 Banner 与底栏素材</span>
-        </div>
-        <label class="quality-toggle">
-          <input id="auto-banners" type="checkbox" checked> 开启
-        </label>
-      </div>
     </section>
 
     <section id="result-card" class="card result-card" hidden>
