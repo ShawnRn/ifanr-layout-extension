@@ -113,6 +113,21 @@ const FEISHU_HEADER_CONTAINER_SELECTOR = [
   '[data-block-type="title"]'
 ].join(', ');
 
+function imgToDataUriViaCanvas(img) {
+  try {
+    if (!img || !img.naturalWidth || !img.naturalHeight) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    const dataUri = canvas.toDataURL('image/png');
+    return (dataUri && dataUri.length > 100) ? dataUri : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function snapshotFeishuBlock(block, captureSequence) {
   const type = block.getAttribute('data-block-type') || '';
   if (!type || ['page', 'back_ref_list', 'catalog', 'table_of_contents', 'comment', 'doc_info', 'page_header', 'page_banner', 'page_icon', 'page_cover', 'page_title', 'doc_header', 'title', 'icon', 'cover'].includes(type)) return null;
@@ -124,37 +139,43 @@ function snapshotFeishuBlock(block, captureSequence) {
   const top = Math.round(rect.top + (container ? container.scrollTop : window.scrollY));
   const order = captureSequence;
 
-  if (type === 'image') {
+  if (type === 'image' || block.querySelector('.image-block, img.docx-image, .image-wrapper, [image-token], [data-token]')) {
     const image = block.querySelector('.image-block img, img.docx-image, img');
-    if (!image) return null;
-    if (image.closest('.author-info, .avatar, .user-avatar, .doc-creator-info, .header-actions, .docx-icon-and-cover, .page-icon-wrapper')) return null;
-    const width = Number(image?.naturalWidth || image?.width || 0);
-    const height = Number(image?.naturalHeight || image?.height || 0);
-    if ((width > 0 && width < 48) || (height > 0 && height < 48)) return null;
+    if (image?.closest('.author-info, .avatar, .user-avatar, .doc-creator-info, .header-actions, .docx-icon-and-cover, .page-icon-wrapper')) return null;
 
-    const imageBlock = block.querySelector('[image-token]') || block.closest('[image-token]') || block;
-    const token = imageBlock?.getAttribute('image-token') || block.getAttribute('data-record-id') || null;
+    const imageBlock = block.querySelector('[image-token], [data-token]') || block.closest('[image-token], [data-token]') || block;
+    const token = imageBlock?.getAttribute('image-token') || imageBlock?.getAttribute('data-token') || block.getAttribute('data-record-id') || null;
     const originSrc = image?.getAttribute('data-origin-src') || image?.getAttribute('data-full-src') || image?.getAttribute('data-src') || image?.getAttribute('data-url') || null;
-    const source = originSrc || image?.src || null;
+    const source = originSrc || image?.src || (token ? `https://${location.host}/space/api/box/stream/download/preview/${token}/?preview_type=16` : null);
     const srcset = image?.getAttribute('srcset') || null;
-    return {
-      id: rawId,
-      top,
-      order,
-      captureSequence,
-      type,
-      recordId: block.getAttribute('data-record-id') || null,
-      image: {
-        src: source,
-        currentSrc: source ? (image?.currentSrc || source) : null,
-        originSrc,
-        srcset,
-        alt: image?.alt || '',
-        token,
-        width,
-        height
-      }
-    };
+
+    // 优先尝试从 DOM Canvas 直接提取已渲染的 Base64（0 延迟、0 失败率）
+    let canvasDataUri = null;
+    if (image && image.complete && (image.naturalWidth > 10 || image.width > 10)) {
+      canvasDataUri = imgToDataUriViaCanvas(image);
+    }
+
+    if (source || canvasDataUri || token) {
+      return {
+        id: rawId,
+        top,
+        order,
+        captureSequence,
+        type: 'image',
+        recordId: block.getAttribute('data-record-id') || null,
+        image: {
+          src: source,
+          currentSrc: source ? (image?.currentSrc || source) : null,
+          originSrc: originSrc || source,
+          dataUri: canvasDataUri,
+          srcset,
+          alt: image?.alt || '',
+          token,
+          width: Number(image?.naturalWidth || image?.width || 0),
+          height: Number(image?.naturalHeight || image?.height || 0)
+        }
+      };
+    }
   }
 
   const rawText = globalThis.IFANR_FEISHU_PAGE_READER.cleanText(block.innerText || block.textContent || '');
@@ -669,63 +690,47 @@ function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', orig
   if (!src && !token && !originSrc) return [];
   const candidates = [];
 
-  // 1. 显式原图属性
-  if (originSrc) candidates.push(originSrc);
+  // 1. 优先使用已知有效且已在 DOM 中加载的原图/当前源地址
+  if (src && !src.startsWith('data:')) candidates.push(src);
+  if (originSrc && originSrc !== src && !originSrc.startsWith('data:')) candidates.push(originSrc);
 
-  // 2. 解析 srcset
-  if (srcset) {
-    const entries = srcset.split(',').map((s) => s.trim().split(/\s+/)[0]).filter(Boolean);
-    candidates.push(...entries.reverse());
+  // 2. 基于 Token 构造安全预览与高清下载地址 (preview_type=16 为标准内联图，preview_type=15 为超清)
+  if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
+    const host = location.host.includes('feishu.cn') ? location.host : 'internal-api-drive-stream.feishu.cn';
+    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=16`);
+    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=15`);
+    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/`);
+    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=1`);
   }
 
-  // 3. 针对飞书 Drive API 构造全高清原图地址 (preview_type=1 为官方全分辨率原图, preview_type=15 为 4K 极清)
+  // 3. 针对飞书 Drive API 构造高清变体
   const baseSrc = originSrc || src;
-  if (baseSrc) {
+  if (baseSrc && !baseSrc.startsWith('data:')) {
     try {
       const u = new URL(baseSrc, location.href);
       if (u.hostname.includes('feishu.cn') || u.hostname.includes('feishucdn.com')) {
-        // preview_type=1 (官方无损全分辨率)
-        const u1 = new URL(baseSrc, location.href);
-        u1.searchParams.set('preview_type', '1');
-        u1.searchParams.delete('width');
-        u1.searchParams.delete('height');
-        u1.searchParams.delete('size');
-        u1.searchParams.delete('rule');
-        candidates.push(u1.toString());
+        const u16 = new URL(baseSrc, location.href);
+        u16.searchParams.set('preview_type', '16');
+        candidates.push(u16.toString());
 
-        // preview_type=15 (4K超清)
         const u15 = new URL(baseSrc, location.href);
         u15.searchParams.set('preview_type', '15');
-        u15.searchParams.delete('width');
-        u15.searchParams.delete('height');
-        u15.searchParams.delete('size');
-        u15.searchParams.delete('rule');
         candidates.push(u15.toString());
 
-        // 移除 preview_type（原始直连流）
         const uRaw = new URL(baseSrc, location.href);
         uRaw.searchParams.delete('preview_type');
-        uRaw.searchParams.delete('width');
-        uRaw.searchParams.delete('height');
-        uRaw.searchParams.delete('size');
-        uRaw.searchParams.delete('rule');
         candidates.push(uRaw.toString());
       }
     } catch {}
   }
 
-  // 4. 基于 Token 构造高清地址
-  if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
-    const host = location.host.includes('feishu.cn') ? location.host : 'internal-api-drive-stream.feishu.cn';
-    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=1`);
-    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=15`);
-    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/`);
+  // 4. 解析 srcset
+  if (srcset) {
+    const entries = srcset.split(',').map((s) => s.trim().split(/\s+/)[0]).filter(Boolean);
+    candidates.push(...entries.reverse());
   }
 
-  // 5. 兜底原始地址
-  if (src) candidates.push(src);
-
-  return [...new Set(candidates)];
+  return [...new Set(candidates.filter(Boolean))];
 }
 
 async function fetchImageAsDataUri(src, token = '', srcset = '', originSrc = '') {
@@ -736,17 +741,20 @@ async function fetchImageAsDataUri(src, token = '', srcset = '', originSrc = '')
 
   for (const url of candidates) {
     try {
-      const res = await fetch(url, { credentials: 'include' });
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timeoutId = controller ? setTimeout(() => controller.abort(), 3000) : null;
+      const res = await fetch(url, {
+        credentials: 'include',
+        signal: controller ? controller.signal : undefined
+      }).finally(() => {
+        if (timeoutId) clearTimeout(timeoutId);
+      });
+
       if (res.ok) {
         const blob = await res.blob();
         if (blob && blob.size > 200) {
-          if (!bestBlob || blob.size > bestBlob.size) {
-            bestBlob = blob;
-          }
-          // 如果获取到了大于 40KB 的图片二进制，说明成功拿到高清/原图
-          if (blob.size > 40 * 1024) {
-            break;
-          }
+          bestBlob = blob;
+          break;
         }
       }
     } catch {}
@@ -777,26 +785,26 @@ async function extractFeishuDocDirect() {
 
   try {
     let maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-    const step = Math.max(280, Math.floor(container.clientHeight * 0.65));
+    const step = Math.max(260, Math.floor(container.clientHeight * 0.6));
 
     // 先扫首屏
     container.scrollTop = 0;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
-    await feishuDelay(40);
+    await feishuDelay(50);
     scanVisibleFeishuBlocks(blocksById, sequence);
 
-    // 极速平滑向下扫描
+    // 平滑向下扫描并挂载所有虚拟列表中的图片
     for (let pos = 0; pos <= maxScroll; pos += step) {
       container.scrollTop = pos;
       container.dispatchEvent(new Event('scroll', { bubbles: true }));
-      await feishuDelay(25);
+      await feishuDelay(45);
       scanVisibleFeishuBlocks(blocksById, sequence);
       maxScroll = Math.max(maxScroll, container.scrollHeight - container.clientHeight);
     }
 
     container.scrollTop = maxScroll;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
-    await feishuDelay(25);
+    await feishuDelay(45);
     scanVisibleFeishuBlocks(blocksById, sequence);
   } finally {
     container.scrollTop = originalScrollTop;
@@ -810,25 +818,32 @@ async function extractFeishuDocDirect() {
     return Number(a.order || 0) - Number(b.order || 0);
   });
 
-  // 并发将所有图片转为微信 DataURI，同时保留原图 HTTP/HTTPS URL 供 Pad 导出
+  // 并发将所有图片转为微信 Base64 DataURI，同时保留原图 HTTP/HTTPS URL 供 Pad 导出
   const imageBlocks = blocks.filter((b) => b.type === 'image' || b.image);
-  await Promise.all(imageBlocks.map(async (block) => {
-    const src = block.image?.originSrc || block.image?.currentSrc || block.image?.src;
-    const token = block.image?.token;
-    const srcset = block.image?.srcset;
-    const originSrc = block.image?.originSrc || src;
+  
+  // 按 4 个一组并发拉取未完成 DataURI 转换的图片，防止飞书限制并发数
+  for (let i = 0; i < imageBlocks.length; i += 4) {
+    const chunk = imageBlocks.slice(i, i + 4);
+    await Promise.all(chunk.map(async (block) => {
+      if (block.image?.dataUri && block.image.dataUri.startsWith('data:')) {
+        return;
+      }
+      const src = block.image?.originSrc || block.image?.currentSrc || block.image?.src;
+      const token = block.image?.token;
+      const srcset = block.image?.srcset;
+      const originSrc = block.image?.originSrc || src;
 
-    if (src && !src.startsWith('data:')) {
-      const dataUri = await fetchImageAsDataUri(src, token, srcset, originSrc);
-      if (dataUri && dataUri.startsWith('data:')) {
-        block.image.dataUri = dataUri;
-        // 关键：originSrc 保持 HTTP URL，以便 Pad 标准排版与导出使用
-        if (!block.image.originSrc) {
-          block.image.originSrc = src;
+      if (src && !src.startsWith('data:')) {
+        const dataUri = await fetchImageAsDataUri(src, token, srcset, originSrc);
+        if (dataUri && dataUri.startsWith('data:')) {
+          block.image.dataUri = dataUri;
+          if (!block.image.originSrc) {
+            block.image.originSrc = src;
+          }
         }
       }
-    }
-  }));
+    }));
+  }
 
   return {
     ok: true,
