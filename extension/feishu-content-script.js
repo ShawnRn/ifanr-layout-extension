@@ -757,54 +757,79 @@ function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', orig
   return [...new Set(candidates.filter(Boolean))];
 }
 
-async function getImageBlob(imageUrl) {
+function buildHighResFeishuUrl(src, previewType = '1') {
+  if (!src || src.startsWith('data:')) return src;
+  try {
+    const u = new URL(src, location.href);
+    if (u.hostname.includes('feishu.cn') || u.hostname.includes('feishucdn.com') || u.hostname.includes('drive-stream')) {
+      u.searchParams.set('preview_type', String(previewType));
+      u.searchParams.delete('width');
+      u.searchParams.delete('height');
+      u.searchParams.delete('size');
+      u.searchParams.delete('rule');
+      return u.toString();
+    }
+  } catch {}
+  return src.replace(/preview_type=\d+/g, `preview_type=${previewType}`);
+}
+
+async function getImageBlob(imageUrl, token = '') {
   if (!imageUrl || imageUrl.startsWith('data:')) return null;
 
-  // 1. 优先尝试 preview_type=1 (官方无损全分辨率原图)
-  const u1 = imageUrl.replace(/preview_type=16/g, 'preview_type=1');
-  try {
-    const res1 = await fetch(u1, { credentials: 'include', cache: 'force-cache' });
-    if (res1.ok) {
-      const contentType = (res1.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json') && !contentType.includes('text/html')) {
-        const blob = await res1.blob();
-        if (blob && blob.size > 500 && (blob.type.startsWith('image/') || contentType.startsWith('image/') || !contentType)) {
-          return blob;
+  const candidates = [];
+
+  // 1. 无损全分辨率 preview_type=1 (删除 width/height/size/rule 限制)
+  const u1 = buildHighResFeishuUrl(imageUrl, '1');
+  if (u1) candidates.push(u1);
+
+  // 2. 4K 极清 preview_type=15 (删除 width/height/size/rule 限制)
+  const u15 = buildHighResFeishuUrl(imageUrl, '15');
+  if (u15 && u15 !== u1) candidates.push(u15);
+
+  // 3. 基于 Token 构造同域名及 drive-stream preview_type=1 和 15
+  if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
+    const host = location.host.includes('feishu.cn') ? location.host : 'internal-api-drive-stream.feishu.cn';
+    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=1`);
+    candidates.push(`https://${host}/space/api/box/stream/download/preview/${token}/?preview_type=15`);
+    if (host !== 'internal-api-drive-stream.feishu.cn') {
+      candidates.push(`https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${token}/?preview_type=1`);
+    }
+  }
+
+  // 4. 原始 URL
+  candidates.push(imageUrl);
+
+  let bestBlob = null;
+
+  for (const url of [...new Set(candidates.filter(Boolean))]) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch(url, {
+        credentials: 'include',
+        signal: controller.signal
+      }).finally(() => clearTimeout(timeoutId));
+
+      if (res.ok) {
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        if (contentType.includes('application/json') || contentType.includes('text/html')) {
+          continue;
+        }
+        const blob = await res.blob();
+        if (blob && blob.size > 200 && (blob.type.startsWith('image/') || contentType.startsWith('image/') || !contentType)) {
+          if (!bestBlob || blob.size > bestBlob.size) {
+            bestBlob = blob;
+          }
+          // 只要成功拿到大于 35KB 的有效原图或者 preview_type=1，立即采用
+          if (blob.size > 35 * 1024 || url.includes('preview_type=1')) {
+            break;
+          }
         }
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
-  // 2. 尝试 preview_type=15 (4K 极清预览)
-  const u15 = imageUrl.replace(/preview_type=16/g, 'preview_type=15');
-  try {
-    const res15 = await fetch(u15, { credentials: 'include', cache: 'force-cache' });
-    if (res15.ok) {
-      const contentType = (res15.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json') && !contentType.includes('text/html')) {
-        const blob = await res15.blob();
-        if (blob && blob.size > 500 && (blob.type.startsWith('image/') || contentType.startsWith('image/') || !contentType)) {
-          return blob;
-        }
-      }
-    }
-  } catch {}
-
-  // 3. 从浏览器缓存直接提取原始图片二进制 (100% 成功率保障)
-  try {
-    const resOrig = await fetch(imageUrl, { credentials: 'include', cache: 'force-cache' });
-    if (resOrig.ok) {
-      const contentType = (resOrig.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json') && !contentType.includes('text/html')) {
-        const blob = await resOrig.blob();
-        if (blob && blob.size > 200) {
-          return blob;
-        }
-      }
-    }
-  } catch {}
-
-  return null;
+  return bestBlob;
 }
 
 async function extractFeishuDocDirect() {
@@ -862,10 +887,10 @@ async function extractFeishuDocDirect() {
 
     let blob = null;
     if (src) {
-      blob = await getImageBlob(src);
+      blob = await getImageBlob(src, token);
     }
     if (!blob && dataSrc) {
-      blob = await getImageBlob(dataSrc);
+      blob = await getImageBlob(dataSrc, token);
     }
 
     if (blob) {
@@ -888,7 +913,7 @@ async function extractFeishuDocDirect() {
     if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
       block.image.originSrc = `https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${token}/?preview_type=1`;
     } else if (src) {
-      block.image.originSrc = src.replace(/preview_type=16/g, 'preview_type=1');
+      block.image.originSrc = buildHighResFeishuUrl(src, '1');
     }
   }));
 
