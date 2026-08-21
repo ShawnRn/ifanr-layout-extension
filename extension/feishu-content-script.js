@@ -119,6 +119,13 @@ function snapshotFeishuBlock(block, captureSequence) {
     const originSrc = image?.getAttribute('data-origin-src') || image?.getAttribute('data-full-src') || image?.getAttribute('data-src') || image?.getAttribute('data-url') || null;
     const source = originSrc || image?.src || null;
     const srcset = image?.getAttribute('srcset') || null;
+
+    // Canvas 兜底：即使 fetch 高清图失败，也能保证 Base64 可用（GIF 除外）
+    let fallbackDataUri = null;
+    if (image && image.complete && width > 10) {
+      try { fallbackDataUri = imgToDataUriViaCanvas(image); } catch {}
+    }
+
     return {
       id: rawId,
       top,
@@ -130,6 +137,7 @@ function snapshotFeishuBlock(block, captureSequence) {
         src: source,
         currentSrc: source ? (image?.currentSrc || source) : null,
         originSrc,
+        fallbackDataUri,
         srcset,
         alt: image?.alt || '',
         token,
@@ -790,9 +798,12 @@ async function extractFeishuDocDirect() {
     return Number(a.order || 0) - Number(b.order || 0);
   });
 
-  // 并发高速将所有图片以 100% 原图无损画质转换为微信可直读与托管的 DataURI (Base64)
+  // 限流并发（3 个一组）将所有图片转为 Base64 DataURI，避免飞书频率限制
   const imageBlocks = blocks.filter((b) => b.type === 'image' || b.image);
-  await Promise.all(imageBlocks.map(async (block) => {
+  const queue = [...imageBlocks];
+  const CONCURRENCY = 3;
+
+  async function processImage(block) {
     const src = block.image?.currentSrc || block.image?.src;
     const token = block.image?.token;
     const srcset = block.image?.srcset;
@@ -803,9 +814,25 @@ async function extractFeishuDocDirect() {
         block.image.dataUri = dataUri;
         block.image.src = dataUri;
         block.image.currentSrc = dataUri;
+        return;
       }
     }
-  }));
+    // Canvas 兜底：fetch 失败时使用扫描阶段捕获的 Canvas 截图
+    if (block.image?.fallbackDataUri) {
+      block.image.dataUri = block.image.fallbackDataUri;
+      block.image.src = block.image.fallbackDataUri;
+    }
+  }
+
+  // 限流并发执行
+  let cursor = 0;
+  async function worker() {
+    while (cursor < queue.length) {
+      const block = queue[cursor++];
+      await processImage(block);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, () => worker()));
 
   return {
     ok: true,
