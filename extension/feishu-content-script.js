@@ -145,37 +145,25 @@ function snapshotFeishuBlock(block, captureSequence) {
 
     const imageBlock = block.querySelector('[image-token], [data-token]') || block.closest('[image-token], [data-token]') || block;
     const token = image?.getAttribute('data-token') || imageBlock?.getAttribute('image-token') || imageBlock?.getAttribute('data-token') || block.getAttribute('data-record-id') || null;
-    const dataSrc = image?.getAttribute('data-src') || imageBlock?.getAttribute('data-src') || null;
-    const originSrc = image?.getAttribute('data-origin-src') || image?.getAttribute('data-full-src') || dataSrc || image?.getAttribute('data-url') || null;
-    const recordId = block.getAttribute('data-record-id') || block.getAttribute('data-block-id') || null;
-    const source = dataSrc || originSrc || (token ? `https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${token}/?preview_type=1` : null) || image?.src;
+    const originSrc = image?.getAttribute('data-origin-src') || image?.getAttribute('data-full-src') || image?.getAttribute('data-src') || image?.getAttribute('data-url') || null;
+    const source = originSrc || image?.src || null;
     const srcset = image?.getAttribute('srcset') || null;
 
-    // 兜底记录 DOM Canvas Base64
-    let fallbackDataUri = null;
-    if (image && image.complete && (image.naturalWidth > 10 || image.width > 10)) {
-      fallbackDataUri = imgToDataUriViaCanvas(image);
-    }
-
-    if (source || fallbackDataUri || token) {
+    if (source || token) {
       return {
         id: rawId,
         top,
         order,
         captureSequence,
         type: 'image',
-        recordId,
+        recordId: block.getAttribute('data-record-id') || null,
         image: {
           src: source,
           currentSrc: source ? (image?.currentSrc || source) : null,
-          originSrc: originSrc || source,
-          dataSrc,
-          dataUri: null,
-          fallbackDataUri,
+          originSrc,
           srcset,
           alt: image?.alt || '',
           token,
-          recordId,
           width: Number(image?.naturalWidth || image?.width || 0),
           height: Number(image?.naturalHeight || image?.height || 0)
         }
