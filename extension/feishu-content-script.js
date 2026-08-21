@@ -11,10 +11,28 @@ function feishuDelay(milliseconds) {
 }
 
 function feishuScrollContainer() {
-  const preferred = document.querySelector('.bear-web-x-container');
-  if (preferred && preferred.scrollHeight > preferred.clientHeight + 100) return preferred;
-  return [...document.querySelectorAll('div')]
-    .find((element) => element.clientHeight > 200 && element.scrollHeight > element.clientHeight + 300) || null;
+  const preferredSelectors = [
+    '.bear-web-x-container',
+    '.bear-web-body',
+    '.docx-page-container',
+    '.docx-editor',
+    '.wiki-content',
+    '#mainContainer',
+    '.main-editor-container'
+  ];
+
+  for (const selector of preferredSelectors) {
+    const el = document.querySelector(selector);
+    if (el && el.scrollHeight > el.clientHeight + 60 && el.clientHeight > 150) {
+      return el;
+    }
+  }
+
+  const scrollableDiv = [...document.querySelectorAll('div, section, main')]
+    .find((element) => element.clientHeight > 200 && element.scrollHeight > element.clientHeight + 150);
+  if (scrollableDiv) return scrollableDiv;
+
+  return document.scrollingElement || document.documentElement || document.body;
 }
 
 function feishuTitle() {
@@ -758,25 +776,37 @@ async function extractFeishuDocDirect() {
   const sequence = { next: 1 };
 
   try {
-    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-    const step = Math.max(280, Math.floor(container.clientHeight * 0.7));
+    let maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+    const step = Math.max(220, Math.floor(container.clientHeight * 0.45));
 
-    // 1. 先重置到顶部，等待飞书首屏虚拟 DOM 渲染
+    // 1. 第一轮：从顶部向底部逐屏平滑扫描，等待飞书虚拟 DOM 挂载
     container.scrollTop = 0;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
-    await feishuDelay(60);
+    await feishuDelay(90);
     scanVisibleFeishuBlocks(blocksById, sequence);
 
-    // 2. 依次平滑滚动扫描全文
     for (let pos = 0; pos <= maxScroll; pos += step) {
       container.scrollTop = pos;
       container.dispatchEvent(new Event('scroll', { bubbles: true }));
-      await feishuDelay(20);
+      await feishuDelay(70);
       scanVisibleFeishuBlocks(blocksById, sequence);
+      maxScroll = Math.max(maxScroll, container.scrollHeight - container.clientHeight);
     }
     container.scrollTop = maxScroll;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
-    await feishuDelay(20);
+    await feishuDelay(70);
+    scanVisibleFeishuBlocks(blocksById, sequence);
+
+    // 2. 第二轮：从底部向上核对扫描，确保中间长图与代码块全部无遗漏
+    for (let pos = maxScroll; pos >= 0; pos -= step) {
+      container.scrollTop = pos;
+      container.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await feishuDelay(50);
+      scanVisibleFeishuBlocks(blocksById, sequence);
+    }
+    container.scrollTop = 0;
+    container.dispatchEvent(new Event('scroll', { bubbles: true }));
+    await feishuDelay(50);
     scanVisibleFeishuBlocks(blocksById, sequence);
   } finally {
     container.scrollTop = originalScrollTop;
@@ -790,19 +820,22 @@ async function extractFeishuDocDirect() {
     return Number(a.order || 0) - Number(b.order || 0);
   });
 
-  // 并发高速将所有图片以 100% 原图无损画质转换为微信可直读与托管的 DataURI (Base64)
+  // 并发将所有图片转为微信 DataURI，同时保留原图 HTTP/HTTPS URL 供 Pad 导出
   const imageBlocks = blocks.filter((b) => b.type === 'image' || b.image);
   await Promise.all(imageBlocks.map(async (block) => {
-    const src = block.image?.currentSrc || block.image?.src;
+    const src = block.image?.originSrc || block.image?.currentSrc || block.image?.src;
     const token = block.image?.token;
     const srcset = block.image?.srcset;
-    const originSrc = block.image?.originSrc;
+    const originSrc = block.image?.originSrc || src;
+
     if (src && !src.startsWith('data:')) {
       const dataUri = await fetchImageAsDataUri(src, token, srcset, originSrc);
       if (dataUri && dataUri.startsWith('data:')) {
         block.image.dataUri = dataUri;
-        block.image.src = dataUri;
-        block.image.currentSrc = dataUri;
+        // 关键：originSrc 保持 HTTP URL，以便 Pad 标准排版与导出使用
+        if (!block.image.originSrc) {
+          block.image.originSrc = src;
+        }
       }
     }
   }));

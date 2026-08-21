@@ -84,6 +84,8 @@
       if (packageCard) packageCard.hidden = true;
       if (sourceTitle) sourceTitle.textContent = '尚未选择文档';
       if (sourceMeta) sourceMeta.textContent = '在飞书文档页打开，或点击“从剪贴板读取”';
+      if (metricBlocks) metricBlocks.textContent = '—';
+      if (metricImages) metricImages.textContent = '—';
       return;
     }
 
