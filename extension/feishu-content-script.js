@@ -11,28 +11,10 @@ function feishuDelay(milliseconds) {
 }
 
 function feishuScrollContainer() {
-  const preferredSelectors = [
-    '.bear-web-x-container',
-    '.bear-web-body',
-    '.docx-page-container',
-    '.docx-editor',
-    '.wiki-content',
-    '#mainContainer',
-    '.main-editor-container'
-  ];
-
-  for (const selector of preferredSelectors) {
-    const el = document.querySelector(selector);
-    if (el && el.scrollHeight > el.clientHeight + 60 && el.clientHeight > 150) {
-      return el;
-    }
-  }
-
-  const scrollableDiv = [...document.querySelectorAll('div, section, main')]
-    .find((element) => element.clientHeight > 200 && element.scrollHeight > element.clientHeight + 150);
-  if (scrollableDiv) return scrollableDiv;
-
-  return document.scrollingElement || document.documentElement || document.body;
+  const preferred = document.querySelector('.bear-web-x-container');
+  if (preferred && preferred.scrollHeight > preferred.clientHeight + 100) return preferred;
+  return [...document.querySelectorAll('div')]
+    .find((element) => element.clientHeight > 200 && element.scrollHeight > element.clientHeight + 300) || null;
 }
 
 function feishuTitle() {
@@ -74,64 +56,10 @@ function cleanCapturedListText(value = '') {
   return globalThis.IFANR_FEISHU_PAGE_READER.cleanListItemText(value);
 }
 
-const FEISHU_UI_NOISE_TEXT = /^(?:添加图标|添加封面|点击添加图标|点击添加封面|更换图标|更换封面|移除封面|移除图标|添加表情|添加背景|添加描述|添加标签|新建页面|关联页面|评论|#|\/\/)$/i;
-
-const FEISHU_HEADER_CONTAINER_SELECTOR = [
-  '.wiki-catalog',
-  '.docx-catalog',
-  '.doc-info-sidebar',
-  '[data-block-type="catalog"]',
-  '.bear-web-catalog',
-  '.docx-page-header',
-  '.doc-header',
-  '.page-header',
-  '.render-unit-header',
-  '.suite-doc-header',
-  '.wiki-header',
-  '.wiki-header-container',
-  '.cover-container',
-  '.icon-container',
-  '.header-actions',
-  '.docx-icon-and-cover',
-  '.page-icon-wrapper',
-  '.page-cover-wrapper',
-  '.doc-title-wrapper',
-  '.doc-title',
-  '.docx-title',
-  '.render-unit-title',
-  '.author-info',
-  '.doc-creator-info',
-  '.page-creator-wrapper',
-  '.doc-info-wrapper',
-  '.comment-box',
-  '.comment-container',
-  '[data-block-type="page_header"]',
-  '[data-block-type="page_banner"]',
-  '[data-block-type="page_icon"]',
-  '[data-block-type="page_cover"]',
-  '[data-block-type="page_title"]',
-  '[data-block-type="title"]'
-].join(', ');
-
-function imgToDataUriViaCanvas(img) {
-  try {
-    if (!img || !img.naturalWidth || !img.naturalHeight) return null;
-    const canvas = document.createElement('canvas');
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0);
-    const dataUri = canvas.toDataURL('image/png');
-    return (dataUri && dataUri.length > 100) ? dataUri : null;
-  } catch (e) {
-    return null;
-  }
-}
-
 function snapshotFeishuBlock(block, captureSequence) {
   const type = block.getAttribute('data-block-type') || '';
-  if (!type || ['page', 'back_ref_list', 'catalog', 'table_of_contents', 'comment', 'doc_info', 'page_header', 'page_banner', 'page_icon', 'page_cover', 'page_title', 'doc_header', 'title', 'icon', 'cover'].includes(type)) return null;
-  if (block.closest(FEISHU_HEADER_CONTAINER_SELECTOR)) return null;
+  if (!type || ['page', 'back_ref_list', 'catalog', 'table_of_contents', 'comment', 'doc_info'].includes(type)) return null;
+  if (block.closest('.wiki-catalog, .docx-catalog, .doc-info-sidebar, [data-block-type="catalog"], .bear-web-catalog')) return null;
 
   const rawId = block.getAttribute('data-block-id') || block.getAttribute('data-record-id') || '';
   const rect = block.getBoundingClientRect();
@@ -139,46 +67,33 @@ function snapshotFeishuBlock(block, captureSequence) {
   const top = Math.round(rect.top + (container ? container.scrollTop : window.scrollY));
   const order = captureSequence;
 
-  if (type === 'image' || block.querySelector('.image-block, img.docx-image, .image-wrapper, [image-token], [data-token]')) {
+  if (type === 'image') {
     const image = block.querySelector('.image-block img, img.docx-image, img');
-    if (image?.closest('.author-info, .avatar, .user-avatar, .doc-creator-info, .header-actions, .docx-icon-and-cover, .page-icon-wrapper')) return null;
-
-    const imageBlock = block.querySelector('[image-token], [data-token]') || block.closest('[image-token], [data-token]') || block;
-    const token = image?.getAttribute('data-token') || imageBlock?.getAttribute('image-token') || imageBlock?.getAttribute('data-token') || block.getAttribute('data-record-id') || null;
+    const imageBlock = block.querySelector('[image-token]') || block.closest('[image-token]') || block;
+    const token = imageBlock?.getAttribute('image-token') || block.getAttribute('data-record-id') || null;
     const originSrc = image?.getAttribute('data-origin-src') || image?.getAttribute('data-full-src') || image?.getAttribute('data-src') || image?.getAttribute('data-url') || null;
     const source = originSrc || image?.src || null;
     const srcset = image?.getAttribute('srcset') || null;
-
-    if (source || token) {
-      return {
-        id: rawId,
-        top,
-        order,
-        captureSequence,
-        type: 'image',
-        recordId: block.getAttribute('data-record-id') || null,
-        image: {
-          src: source,
-          currentSrc: source ? (image?.currentSrc || source) : null,
-          originSrc,
-          srcset,
-          alt: image?.alt || '',
-          token,
-          width: Number(image?.naturalWidth || image?.width || 0),
-          height: Number(image?.naturalHeight || image?.height || 0)
-        }
-      };
-    }
+    return {
+      id: rawId,
+      top,
+      order,
+      captureSequence,
+      type,
+      recordId: block.getAttribute('data-record-id') || null,
+      image: {
+        src: source,
+        currentSrc: source ? (image?.currentSrc || source) : null,
+        originSrc,
+        srcset,
+        alt: image?.alt || '',
+        token,
+        width: Number(image?.naturalWidth || image?.width || 0),
+        height: Number(image?.naturalHeight || image?.height || 0)
+      }
+    };
   }
-
   const rawText = globalThis.IFANR_FEISHU_PAGE_READER.cleanText(block.innerText || block.textContent || '');
-  if (FEISHU_UI_NOISE_TEXT.test(rawText.trim())) return null;
-
-  const currentTitle = feishuTitle();
-  if (currentTitle && rawText === currentTitle && (block.tagName === 'H1' || block.querySelector('h1') || block.closest('.doc-title, .render-unit-title, .docx-title, .bear-web-title') || top < 250)) {
-    return null;
-  }
-
   const className = String(block.className || '');
   const caption = /(?:^|[-_])(?:image[-_])?(?:caption|description)(?:$|[-_])/i.test(className);
   const explicitListKind = type === 'ordered'
@@ -205,34 +120,14 @@ function snapshotFeishuBlock(block, captureSequence) {
 }
 
 function scanVisibleFeishuBlocks(blocksById, sequence) {
-  const seenImageTokens = new Set();
-  for (const b of blocksById.values()) {
-    if (b.image?.token) seenImageTokens.add(b.image.token);
-    if (b.image?.src) seenImageTokens.add(b.image.src.split('?')[0]);
-  }
-
   for (const element of document.querySelectorAll('[data-block-id]')) {
-    if (element.closest(FEISHU_HEADER_CONTAINER_SELECTOR)) continue;
-    if (element.parentElement?.closest('[data-block-id][data-block-type="image"]')) continue;
-
+    if (element.closest('.wiki-catalog, .docx-catalog, .doc-info-sidebar, [data-block-type="catalog"], .bear-web-catalog')) continue;
     const rawId = element.getAttribute('data-block-id') || element.getAttribute('data-record-id') || '';
     if (!rawId) continue;
     const key = rawId || `observed-${sequence.next}`;
     const previous = blocksById.get(key);
     const snapshot = snapshotFeishuBlock(element, previous?.captureSequence || sequence.next);
     if (!snapshot) continue;
-
-    // 图片 Token 去重
-    if (snapshot.type === 'image' || snapshot.image) {
-      const token = snapshot.image?.token;
-      const srcKey = snapshot.image?.src ? snapshot.image.src.split('?')[0] : '';
-      if (!previous && ((token && seenImageTokens.has(token)) || (srcKey && seenImageTokens.has(srcKey)))) {
-        continue;
-      }
-      if (token) seenImageTokens.add(token);
-      if (srcKey) seenImageTokens.add(srcKey);
-    }
-
     if (!previous) sequence.next += 1;
     if (previous && snapshot.top > 0) {
       previous.top = snapshot.top;
@@ -790,7 +685,7 @@ async function extractFeishuDocDirect() {
   const sequence = { next: 1 };
 
   try {
-    let maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
     const step = Math.max(280, Math.floor(container.clientHeight * 0.7));
 
     // 1. 先重置到顶部，等待飞书首屏虚拟 DOM 渲染
@@ -805,7 +700,6 @@ async function extractFeishuDocDirect() {
       container.dispatchEvent(new Event('scroll', { bubbles: true }));
       await feishuDelay(20);
       scanVisibleFeishuBlocks(blocksById, sequence);
-      maxScroll = Math.max(maxScroll, container.scrollHeight - container.clientHeight);
     }
     container.scrollTop = maxScroll;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
