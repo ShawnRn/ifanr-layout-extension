@@ -691,23 +691,12 @@ async function captureCurrentFeishuPage(message) {
   }
 }
 
-function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', originSrc = '', dataSrc = '', recordId = '') {
+function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', originSrc = '', dataSrc = '') {
   if (!src && !token && !originSrc && !dataSrc) return [];
   const candidates = [];
   const driveHost = 'internal-api-drive-stream.feishu.cn';
 
-  // 1. 无损全分辨率官方预览通道 preview_type=1 (最高优先级)
-  if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
-    if (recordId) {
-      candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?mount_node_token=${recordId}&mount_point=docx_image&preview_type=1`);
-      candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?mount_node_token=${recordId}&mount_point=docx_image&preview_type=15`);
-    }
-    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?preview_type=1`);
-    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?preview_type=15`);
-    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/`);
-  }
-
-  // 2. 从 baseSrc 中提取并构造 preview_type=1 / 15
+  // 1. 如果 baseSrc 包含 URL，直接将 preview_type 替换为 1 (无损全尺寸) 和 15 (4K 极清)
   const baseSrc = originSrc || src || dataSrc;
   if (baseSrc && !baseSrc.startsWith('data:')) {
     try {
@@ -739,6 +728,13 @@ function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', orig
     } catch {}
   }
 
+  // 2. 基于 token 构造官方标准全分辨率 preview_type=1 和 15
+  if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
+    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?preview_type=1`);
+    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?preview_type=15`);
+    candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/`);
+  }
+
   // 3. 官方 data-src 属性
   if (dataSrc && !dataSrc.startsWith('data:')) {
     candidates.push(dataSrc);
@@ -761,16 +757,16 @@ function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', orig
   return [...new Set(candidates.filter(Boolean))];
 }
 
-async function fetchImageAsDataUri(src, token = '', srcset = '', originSrc = '', dataSrc = '', recordId = '') {
+async function fetchImageAsDataUri(src, token = '', srcset = '', originSrc = '', dataSrc = '') {
   if (!src || src.startsWith('data:')) return src;
-  const candidates = getHighResFeishuImageCandidates(src, token, srcset, originSrc, dataSrc, recordId);
+  const candidates = getHighResFeishuImageCandidates(src, token, srcset, originSrc, dataSrc);
 
   let bestBlob = null;
 
   for (const url of candidates) {
     try {
       const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timeoutId = controller ? setTimeout(() => controller.abort(), 4000) : null;
+      const timeoutId = controller ? setTimeout(() => controller.abort(), 2500) : null;
       const res = await fetch(url, {
         credentials: 'include',
         signal: controller ? controller.signal : undefined
@@ -784,12 +780,12 @@ async function fetchImageAsDataUri(src, token = '', srcset = '', originSrc = '',
           continue;
         }
         const blob = await res.blob();
-        if (blob && blob.size > 500 && (blob.type.startsWith('image/') || contentType.startsWith('image/'))) {
+        if (blob && blob.size > 500 && (blob.type.startsWith('image/') || contentType.startsWith('image/') || !contentType)) {
           if (!bestBlob || blob.size > bestBlob.size) {
             bestBlob = blob;
           }
-          // 只要成功拿到无损原图或大于 25KB 的清晰大图，立即采用
-          if (blob.size > 25 * 1024 || (url.includes('preview_type=1') && blob.size > 3000)) {
+          // 只要成功拿到有效无损原图二进制，立即采用
+          if (blob.size > 20 * 1024 || (url.includes('preview_type=1') && blob.size > 2000)) {
             break;
           }
         }
@@ -822,26 +818,26 @@ async function extractFeishuDocDirect() {
 
   try {
     let maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-    const step = Math.max(260, Math.floor(container.clientHeight * 0.6));
+    const step = Math.max(380, Math.floor(container.clientHeight * 0.75));
 
     // 先扫首屏
     container.scrollTop = 0;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
-    await feishuDelay(50);
+    await feishuDelay(20);
     scanVisibleFeishuBlocks(blocksById, sequence);
 
     // 平滑向下扫描并挂载所有虚拟列表中的图片
     for (let pos = 0; pos <= maxScroll; pos += step) {
       container.scrollTop = pos;
       container.dispatchEvent(new Event('scroll', { bubbles: true }));
-      await feishuDelay(45);
+      await feishuDelay(20);
       scanVisibleFeishuBlocks(blocksById, sequence);
       maxScroll = Math.max(maxScroll, container.scrollHeight - container.clientHeight);
     }
 
     container.scrollTop = maxScroll;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
-    await feishuDelay(45);
+    await feishuDelay(20);
     scanVisibleFeishuBlocks(blocksById, sequence);
   } finally {
     container.scrollTop = originalScrollTop;
@@ -855,43 +851,36 @@ async function extractFeishuDocDirect() {
     return Number(a.order || 0) - Number(b.order || 0);
   });
 
-  // 并发将所有图片转为微信全尺寸无损 Base64 DataURI，同时保留原图 HTTP/HTTPS URL 供 Pad 导出
+  // 并发将所有图片以 100% 原图无损画质转换为微信可直读与托管的 DataURI (Base64)
   const imageBlocks = blocks.filter((b) => b.type === 'image' || b.image);
-  
-  // 按 4 个一组并发拉取全分辨率原图
-  for (let i = 0; i < imageBlocks.length; i += 4) {
-    const chunk = imageBlocks.slice(i, i + 4);
-    await Promise.all(chunk.map(async (block) => {
-      const src = block.image?.originSrc || block.image?.currentSrc || block.image?.src;
-      const token = block.image?.token;
-      const srcset = block.image?.srcset;
-      const originSrc = block.image?.originSrc || src;
-      const dataSrc = block.image?.dataSrc || '';
-      const recordId = block.image?.recordId || block.recordId || '';
+  await Promise.all(imageBlocks.map(async (block) => {
+    const src = block.image?.originSrc || block.image?.currentSrc || block.image?.src;
+    const token = block.image?.token;
+    const srcset = block.image?.srcset;
+    const originSrc = block.image?.originSrc || src;
+    const dataSrc = block.image?.dataSrc || '';
 
-      let dataUri = null;
-      if (src || token || dataSrc) {
-        dataUri = await fetchImageAsDataUri(src, token, srcset, originSrc, dataSrc, recordId);
-      }
+    let dataUri = null;
+    if (src || token || dataSrc) {
+      dataUri = await fetchImageAsDataUri(src, token, srcset, originSrc, dataSrc);
+    }
 
-      if (dataUri && dataUri.startsWith('data:')) {
-        block.image.dataUri = dataUri;
-      } else if (block.image?.fallbackDataUri) {
-        block.image.dataUri = block.image.fallbackDataUri;
-      }
+    if (dataUri && dataUri.startsWith('data:')) {
+      block.image.dataUri = dataUri;
+      block.image.src = dataUri;
+    }
 
-      // 构造全尺寸无损高清原图 URL 给 Pad 与 Markdown
-      if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
-        block.image.originSrc = `https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${token}/?preview_type=1`;
-      } else if (dataSrc && !dataSrc.includes('preview_type=16')) {
-        block.image.originSrc = dataSrc;
-      } else if (originSrc) {
-        block.image.originSrc = originSrc.replace(/preview_type=16/g, 'preview_type=1');
-      } else if (src) {
-        block.image.originSrc = src.replace(/preview_type=16/g, 'preview_type=1');
-      }
-    }));
-  }
+    // 构造全尺寸无损高清原图 URL 给 Pad 与 Markdown
+    if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
+      block.image.originSrc = `https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${token}/?preview_type=1`;
+    } else if (dataSrc && !dataSrc.includes('preview_type=16')) {
+      block.image.originSrc = dataSrc;
+    } else if (originSrc) {
+      block.image.originSrc = originSrc.replace(/preview_type=16/g, 'preview_type=1');
+    } else if (src) {
+      block.image.originSrc = src.replace(/preview_type=16/g, 'preview_type=1');
+    }
+  }));
 
   return {
     ok: true,
