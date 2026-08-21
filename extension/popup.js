@@ -353,25 +353,6 @@
     renderPackage(pkg);
     showBadgeSuccess();
     return pkg;
-  }l,
-      imageCount: converted.imageCount,
-      blockCount: converted.blockCount,
-      convertedAt: new Date().toISOString()
-    };
-
-    cachedPackage = pkg;
-    await chrome.storage.local.set({
-      [CACHE_KEY]: pkg,
-      [ARTICLE_PKG_KEY]: {
-        html: converted.wechatHtml,
-        sourceUrl,
-        title: pkg.title,
-        brand
-      }
-    });
-    renderPackage(pkg);
-    showBadgeSuccess();
-    return pkg;
   }
 
   /**
