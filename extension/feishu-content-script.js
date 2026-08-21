@@ -58,11 +58,15 @@ function cleanCapturedListText(value = '') {
 
 function snapshotFeishuBlock(block, captureSequence) {
   const type = block.getAttribute('data-block-type') || '';
-  if (!type || ['page', 'back_ref_list'].includes(type)) return null;
+  if (!type || ['page', 'back_ref_list', 'catalog', 'table_of_contents', 'comment', 'doc_info'].includes(type)) return null;
+  if (block.closest('.wiki-catalog, .docx-catalog, .doc-info-sidebar, [data-block-type="catalog"], .bear-web-catalog')) return null;
+
   const rawId = block.getAttribute('data-block-id') || block.getAttribute('data-record-id') || '';
-  // Feishu block ids are opaque identifiers. Numeric-looking ids do not
-  // describe document order, so always preserve first-seen DOM order.
+  const rect = block.getBoundingClientRect();
+  const container = feishuScrollContainer();
+  const top = Math.round(rect.top + (container ? container.scrollTop : window.scrollY));
   const order = captureSequence;
+
   if (type === 'image') {
     const image = block.querySelector('.image-block img, img.docx-image, img');
     const imageBlock = block.querySelector('[image-token]') || block.closest('[image-token]') || block;
@@ -72,6 +76,7 @@ function snapshotFeishuBlock(block, captureSequence) {
     const srcset = image?.getAttribute('srcset') || null;
     return {
       id: rawId,
+      top,
       order,
       captureSequence,
       type,
@@ -101,6 +106,7 @@ function snapshotFeishuBlock(block, captureSequence) {
   if (!text && !['divider', 'horizontal_rule'].includes(type)) return null;
   return {
     id: rawId,
+    top,
     order,
     captureSequence,
     type,
@@ -115,6 +121,7 @@ function snapshotFeishuBlock(block, captureSequence) {
 
 function scanVisibleFeishuBlocks(blocksById, sequence) {
   for (const element of document.querySelectorAll('[data-block-id]')) {
+    if (element.closest('.wiki-catalog, .docx-catalog, .doc-info-sidebar, [data-block-type="catalog"], .bear-web-catalog')) continue;
     const rawId = element.getAttribute('data-block-id') || element.getAttribute('data-record-id') || '';
     if (!rawId) continue;
     const key = rawId || `observed-${sequence.next}`;
@@ -122,6 +129,9 @@ function scanVisibleFeishuBlocks(blocksById, sequence) {
     const snapshot = snapshotFeishuBlock(element, previous?.captureSequence || sequence.next);
     if (!snapshot) continue;
     if (!previous) sequence.next += 1;
+    if (previous && snapshot.top > 0) {
+      previous.top = snapshot.top;
+    }
     if (!previous || (!previous.text && snapshot.text) || (!previous.image && snapshot.image)) blocksById.set(key, snapshot);
   }
 }
@@ -678,24 +688,33 @@ async function extractFeishuDocDirect() {
     const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
     const step = Math.max(280, Math.floor(container.clientHeight * 0.7));
 
+    // 1. 先重置到顶部，等待飞书首屏虚拟 DOM 渲染
+    container.scrollTop = 0;
+    container.dispatchEvent(new Event('scroll', { bubbles: true }));
+    await feishuDelay(60);
+    scanVisibleFeishuBlocks(blocksById, sequence);
+
+    // 2. 依次平滑滚动扫描全文
     for (let pos = 0; pos <= maxScroll; pos += step) {
       container.scrollTop = pos;
       container.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await feishuDelay(20);
       scanVisibleFeishuBlocks(blocksById, sequence);
-      await feishuDelay(15);
     }
     container.scrollTop = maxScroll;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
+    await feishuDelay(20);
     scanVisibleFeishuBlocks(blocksById, sequence);
-    await feishuDelay(15);
   } finally {
     container.scrollTop = originalScrollTop;
     container.dispatchEvent(new Event('scroll', { bubbles: true }));
   }
 
+  // 3. 按真实文档物理纵向绝对坐标 (top) 严格从头到尾排序，确保文章开头 100% 正确
   const blocks = [...blocksById.values()].sort((a, b) => {
-    const byOrder = Number(a.order || 0) - Number(b.order || 0);
-    return byOrder || Number(a.captureSequence || 0) - Number(b.captureSequence || 0);
+    const byTop = (a.top ?? 0) - (b.top ?? 0);
+    if (Math.abs(byTop) > 2) return byTop;
+    return Number(a.order || 0) - Number(b.order || 0);
   });
 
   // 并发高速将所有图片以 100% 原图无损画质转换为微信可直读与托管的 DataURI (Base64)
