@@ -76,6 +76,7 @@
       white-space: nowrap;
     }
     .service-pill[data-state="online"] { color: var(--success); border-color: #CBE4D6; background: var(--success-bg); }
+    .service-pill[data-state="pad"] { color: #722ED1; border-color: #E2D2F8; background: #F8F3FE; font-weight: 500; }
     .service-pill[data-state="offline"] { color: var(--danger); border-color: #F0C9C4; background: var(--danger-bg); }
 
     /* Action buttons in Fixed Top */
@@ -206,15 +207,15 @@
       border-top: 1px dashed rgba(232, 222, 210, 0.9);
     }
     .setting-chip {
-      flex: 1;
+      flex: 1.05;
       display: inline-flex;
       align-items: center;
-      justify-content: center;
-      gap: 5px;
-      min-height: 26px;
-      padding: 2px 6px;
+      justify-content: space-between;
+      gap: 4px;
+      min-height: 28px;
+      padding: 3px 7px 3px 8px;
       border: 1px solid var(--line);
-      border-radius: 7px;
+      border-radius: 8px;
       background: rgba(255, 255, 255, 0.85);
       color: var(--ink);
       font-size: 11px;
@@ -223,24 +224,54 @@
       user-select: none;
       transition: all .15s ease;
       white-space: nowrap;
+      position: relative;
     }
     .setting-chip:hover {
       background: #FFFFFF;
       border-color: #DCCEC0;
     }
     .setting-chip input[type="checkbox"] {
-      accent-color: var(--brand);
+      position: absolute;
+      opacity: 0;
+      width: 0;
+      height: 0;
+      pointer-events: none;
       margin: 0;
-      width: 13px;
-      height: 13px;
-      cursor: pointer;
+    }
+    .switch-ui {
+      position: relative;
+      width: 24px;
+      height: 14px;
+      background: #DDD5CB;
+      border-radius: 999px;
+      transition: background .18s ease;
+      flex-shrink: 0;
+      display: inline-block;
+    }
+    .switch-ui::after {
+      content: '';
+      position: absolute;
+      top: 1.5px;
+      left: 1.5px;
+      width: 11px;
+      height: 11px;
+      background: #FFF;
+      border-radius: 50%;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.22);
+      transition: transform .18s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .setting-chip input[type="checkbox"]:checked + .switch-ui {
+      background: var(--brand);
+    }
+    .setting-chip input[type="checkbox"]:checked + .switch-ui::after {
+      transform: translateX(10px);
     }
     .setting-chip-select {
-      flex: 1;
-      min-height: 26px;
-      padding: 2px 6px;
+      flex: 0.95;
+      min-height: 28px;
+      padding: 3px 6px;
       border: 1px solid var(--line);
-      border-radius: 7px;
+      border-radius: 8px;
       background: rgba(255, 255, 255, 0.85);
       color: var(--ink);
       font-size: 11px;

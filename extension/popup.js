@@ -192,7 +192,11 @@
       sourceUrl,
       brand,
       markdown: converted.markdown,
+      cleanMarkdown: converted.cleanMarkdown || converted.markdown,
+      wechatMarkdown: converted.wechatMarkdown || converted.markdown,
+      rawInput: (typeof htmlOrMarkdown === 'object' || Array.isArray(htmlOrMarkdown)) ? htmlOrMarkdown : (cachedPackage?.rawInput || htmlOrMarkdown),
       wechatHtml: converted.wechatHtml,
+      etherpadBody: converted.etherpadBody || converted.etherpadHtml,
       etherpadHtml: converted.etherpadHtml,
       imageCount: converted.imageCount,
       blockCount: converted.blockCount,
@@ -298,12 +302,12 @@
     } catch (err) {
       console.error('Clipboard convert error:', err);
       showToast('读取剪贴板失败，请检查剪贴板权限');
-      setStatus('读取失败', err.message);
+      setStatus('读取失败', '未能成功读取剪贴板');
     }
   }
 
   /**
-   * 复制公众号富文本
+   * 复制微信公众号富文本
    */
   async function copyWechat() {
     if (!cachedPackage || !cachedPackage.wechatHtml) {
@@ -313,11 +317,11 @@
 
     try {
       const html = cachedPackage.wechatHtml;
-      const plainText = (cachedPackage.title ? `${cachedPackage.title}\n\n` : '') + html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      const text = cachedPackage.markdown || cleanDisplayTitle(cachedPackage.title);
 
-      if (navigator.clipboard?.write && window.ClipboardItem) {
+      if (navigator.clipboard?.write && window.ClipboardItem && html) {
         const blobHtml = new Blob([html], { type: 'text/html' });
-        const blobText = new Blob([plainText], { type: 'text/plain' });
+        const blobText = new Blob([text], { type: 'text/plain' });
         await navigator.clipboard.write([new ClipboardItem({
           'text/html': blobHtml,
           'text/plain': blobText
@@ -326,7 +330,7 @@
         await navigator.clipboard.writeText(html);
       }
 
-      showToast('已复制公众号排版！直接在微信草稿粘贴 (Cmd+V) 即可');
+      showToast('已复制微信公众号排版！可直接粘贴至公众号草稿');
       setStatus('已复制', '公众号富文本已写入剪贴板');
     } catch (err) {
       console.error('Copy wechat error:', err);
@@ -335,7 +339,7 @@
   }
 
   /**
-   * 复制 Pad 标准 HTML 与 Markdown
+   * 复制 Pad 标准 HTML 与 Markdown (与 Lark2Pad 完全对齐)
    */
   async function copyPad() {
     if (!cachedPackage || !cachedPackage.etherpadHtml) {
@@ -345,7 +349,7 @@
 
     try {
       const html = cachedPackage.etherpadHtml;
-      const markdown = cachedPackage.markdown || html;
+      const markdown = cachedPackage.cleanMarkdown || cachedPackage.markdown || html;
 
       if (navigator.clipboard?.write && window.ClipboardItem && html) {
         const blobHtml = new Blob([html], { type: 'text/html' });
@@ -358,7 +362,7 @@
         await navigator.clipboard.writeText(markdown);
       }
 
-      showToast('已复制 Pad 格式！可在 Pad 或 Markdown 编辑器粘贴');
+      showToast('已复制 Pad 格式！可在 Pad 或 Markdown 编辑器直接粘贴');
       setStatus('已复制', 'Pad 标准格式已写入剪贴板');
     } catch (err) {
       console.error('Copy pad error:', err);
@@ -377,32 +381,38 @@
 
     // 1. 判断当前激活标签页
     if (activeTab?.url) {
-      if (isWechatUrl(activeTab.url)) {
-        await injectToWechatTab(activeTab.id);
-        return;
-      }
       if (isPadUrl(activeTab.url)) {
         await injectToPadTab(activeTab.id);
+        return;
+      }
+      if (isWechatUrl(activeTab.url)) {
+        await injectToWechatTab(activeTab.id);
         return;
       }
     }
 
     // 2. 如果当前不是目标页，扫描后台已打开的标签页
-    const wechatTabs = await chrome.tabs.query({ url: '*://mp.weixin.qq.com/*' });
-    const padTabs = await chrome.tabs.query({ url: ['*://*.ifanr.com/pad/*', '*://pad.ifanr.com/*', '*://*/*etherpad*'] });
+    const allTabs = await chrome.tabs.query({}).catch(() => []);
+    const padTabs = allTabs.filter(t => t.url && isPadUrl(t.url));
+    const wechatTabs = allTabs.filter(t => t.url && isWechatUrl(t.url));
 
     if (targetPlatform === 'pad' && padTabs.length > 0) {
       await injectToPadTab(padTabs[0].id);
       return;
     }
 
-    if (wechatTabs.length > 0) {
+    if (targetPlatform === 'wechat' && wechatTabs.length > 0) {
       await injectToWechatTab(wechatTabs[0].id);
       return;
     }
 
     if (padTabs.length > 0) {
       await injectToPadTab(padTabs[0].id);
+      return;
+    }
+
+    if (wechatTabs.length > 0) {
+      await injectToWechatTab(wechatTabs[0].id);
       return;
     }
 
@@ -417,7 +427,18 @@
   }
 
   function isPadUrl(url = '') {
-    return url.includes('pad.ifanr.com') || url.includes('/pad/') || url.includes('etherpad') || url.includes('ep.ifanr.com');
+    if (!url || typeof url !== 'string') return false;
+    try {
+      const u = new URL(url);
+      const host = u.hostname.toLowerCase();
+      const path = u.pathname.toLowerCase();
+      if (host.startsWith('pad.') || host.includes('.pad.') || host.startsWith('ep.') || host.includes('etherpad')) return true;
+      if ((host.includes('ifanr.com') || host.includes('ifanr.cn')) && (path.startsWith('/p/') || path.startsWith('/pad/'))) return true;
+      if (path.includes('etherpad') || path.includes('/pad/')) return true;
+    } catch {
+      return /(?:pad\.|\.pad\.|etherpad|\/p\/|\/pad\/|ep\.ifanr)/i.test(url);
+    }
+    return /(?:pad\.|\.pad\.|etherpad|\/p\/|\/pad\/|ep\.ifanr)/i.test(url);
   }
 
   /**
@@ -486,10 +507,10 @@
     try {
       const [execResult] = await chrome.scripting.executeScript({
         target: { tabId },
-        args: [cachedPackage.etherpadHtml, cachedPackage.markdown, cachedPackage.title],
-        func: (htmlContent, markdownContent, docTitle) => {
-          const outerFrame = document.querySelector('iframe[name="ace_outer"]');
-          const innerFrame = outerFrame?.contentDocument?.querySelector('iframe[name="ace_inner"]');
+        args: [cachedPackage.etherpadBody || cachedPackage.etherpadHtml, cachedPackage.cleanMarkdown || cachedPackage.markdown, cachedPackage.title],
+        func: (bodyHtml, markdownContent, docTitle) => {
+          const outerFrame = document.querySelector('iframe[name="ace_outer"]') || document.querySelector('#ace_outer');
+          const innerFrame = outerFrame?.contentDocument?.querySelector('iframe[name="ace_inner"]') || outerFrame?.contentDocument?.querySelector('#ace_inner');
           const innerDoc = innerFrame?.contentDocument || document;
           const editorBody = innerDoc.querySelector('#innerdocbody') ||
                              document.querySelector('#innerdocbody') ||
@@ -497,14 +518,14 @@
                              document.querySelector('[contenteditable="true"]');
 
           if (editorBody) {
-            editorBody.innerHTML = htmlContent;
+            editorBody.innerHTML = bodyHtml;
             editorBody.dispatchEvent(new Event('input', { bubbles: true }));
             editorBody.dispatchEvent(new Event('change', { bubbles: true }));
             return { ok: true };
           }
 
           if (window.pad && typeof window.pad.setHtml === 'function') {
-            window.pad.setHtml(htmlContent);
+            window.pad.setHtml(bodyHtml);
             return { ok: true };
           }
 
@@ -550,7 +571,8 @@
   titleImageBrandSelect?.addEventListener('change', async () => {
     await saveSettings();
     if (cachedPackage) {
-      await performConversion(cachedPackage.markdown || cachedPackage.wechatHtml, cachedPackage.title, cachedPackage.sourceUrl);
+      const input = cachedPackage.rawInput || cachedPackage.markdown || cachedPackage.wechatHtml;
+      await performConversion(input, cachedPackage.title, cachedPackage.sourceUrl);
       showToast('已更新题图品牌并重新渲染');
     }
   });
@@ -558,8 +580,9 @@
   roundImagesToggle?.addEventListener('change', async () => {
     await saveSettings();
     if (cachedPackage) {
-      await performConversion(cachedPackage.markdown || cachedPackage.wechatHtml, cachedPackage.title, cachedPackage.sourceUrl);
-      showToast(roundImagesToggle.checked ? '已开启图片 2% 连续圆角' : '已关闭图片圆角（直角直出）');
+      const input = cachedPackage.rawInput || cachedPackage.markdown || cachedPackage.wechatHtml;
+      await performConversion(input, cachedPackage.title, cachedPackage.sourceUrl);
+      showToast(roundImagesToggle.checked ? '已开启图片 8px 连续圆角' : '已关闭图片圆角（直角直出）');
     } else {
       showToast(roundImagesToggle.checked ? '图片圆角已开启' : '图片圆角已关闭');
     }
@@ -568,8 +591,9 @@
   autoBannersToggle?.addEventListener('change', async () => {
     await saveSettings();
     if (cachedPackage) {
-      await performConversion(cachedPackage.markdown || cachedPackage.wechatHtml, cachedPackage.title, cachedPackage.sourceUrl);
-      showToast('已更新 Banner 设置');
+      const input = cachedPackage.rawInput || cachedPackage.markdown || cachedPackage.wechatHtml;
+      await performConversion(input, cachedPackage.title, cachedPackage.sourceUrl);
+      showToast('已更新 Banner 设置并重新渲染');
     }
   });
 
@@ -580,20 +604,29 @@
     activeTab = tab;
 
     if (activeTab?.url) {
-      if (isWechatUrl(activeTab.url)) {
-        targetPlatform = 'wechat';
-        if (mainInjectBtn) mainInjectBtn.dataset.target = 'wechat';
-        if (injectBtnText) injectBtnText.textContent = '一键注入公众号';
-        if (serviceIndicator) serviceIndicator.textContent = '识别到微信公众号';
-        setStatus('公众号就绪', '点击右上方按钮一键注入当前草稿');
-      } else if (isPadUrl(activeTab.url)) {
+      if (isPadUrl(activeTab.url)) {
         targetPlatform = 'pad';
         if (mainInjectBtn) mainInjectBtn.dataset.target = 'pad';
         if (injectBtnText) injectBtnText.textContent = '一键注入 Pad';
-        if (serviceIndicator) serviceIndicator.textContent = '识别到 Pad 编辑器';
+        if (serviceIndicator) {
+          serviceIndicator.textContent = '识别到 Pad 编辑器';
+          serviceIndicator.dataset.state = 'pad';
+        }
         setStatus('Pad 就绪', '点击右上方按钮一键注入当前 Pad');
+      } else if (isWechatUrl(activeTab.url)) {
+        targetPlatform = 'wechat';
+        if (mainInjectBtn) mainInjectBtn.dataset.target = 'wechat';
+        if (injectBtnText) injectBtnText.textContent = '一键注入公众号';
+        if (serviceIndicator) {
+          serviceIndicator.textContent = '识别到微信公众号';
+          serviceIndicator.dataset.state = 'online';
+        }
+        setStatus('公众号就绪', '点击右上方按钮一键注入当前草稿');
       } else if (activeTab.url.includes('feishu.cn/wiki/') || activeTab.url.includes('feishu.cn/docx/')) {
-        if (serviceIndicator) serviceIndicator.textContent = '识别到飞书文档';
+        if (serviceIndicator) {
+          serviceIndicator.textContent = '识别到飞书文档';
+          serviceIndicator.dataset.state = 'online';
+        }
         setStatus('飞书文档就绪', '点击左上方秒级读取全文与高清图片');
       }
     }

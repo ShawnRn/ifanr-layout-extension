@@ -15,6 +15,8 @@
     "https://*.feishucdn.com/*",
     "https://mp.weixin.qq.com/*",
     "https://*.ifanr.com/*",
+    "https://*.corp.ifanr.com/*",
+    "https://pad.corp.ifanr.com/*",
     "https://*.ifanr.cn/*",
     "http://127.0.0.1/*",
     "http://localhost/*"

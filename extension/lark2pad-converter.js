@@ -386,12 +386,7 @@ ${WECHAT_FOOTER_IMAGES_HTML}
   /**
   * 将 Markdown 转换为标准 Etherpad (Pad) HTML (与 Lark2Pad 官方导出 100% 对齐)
   */
-  function markdownToEtherpadHTML(markdown = '', options = {}) {
-    const {
-      addHeaderBanner = true,
-      addFooterBanner = true
-    } = options;
-
+  function buildEtherpadBodyHTML(markdown = '') {
     const rawLines = String(markdown)
       .replaceAll('\r\n', '\n')
       .replaceAll('\r', '\n')
@@ -399,11 +394,6 @@ ${WECHAT_FOOTER_IMAGES_HTML}
 
     let body = '';
     let lastImageSrc = '';
-
-    if (addHeaderBanner) {
-      body += `<img src="${ETHERPAD_HEADER_BANNER_PNG}"><br>\n`;
-      lastImageSrc = ETHERPAD_HEADER_BANNER_PNG;
-    }
 
     let i = 0;
     while (i < rawLines.length) {
@@ -472,10 +462,10 @@ ${WECHAT_FOOTER_IMAGES_HTML}
       i++;
     }
 
-    if (addFooterBanner) {
-      body += `<img src="${ETHERPAD_FOOTER_BANNER_PNG}"><br>\n`;
-    }
+    return body;
+  }
 
+  function wrapInEtherpadDocument(body = '') {
     return `<!doctype html>
 <html lang="en">
 <head>
@@ -485,42 +475,33 @@ ${WECHAT_FOOTER_IMAGES_HTML}
 <meta name="changedby" content="Etherpad">
 <meta charset="utf-8">
 <style>
-ol {
-  counter-reset: item;
-}
-
-ol > li {
-  counter-increment: item;
-}
-
-ol ol > li {
+ol { counter-reset: item; }
+ol > li { counter-increment: item; display: block; }
+ol > li:before { content: counters(item, ".") ". "; }
+ul.indent { list-style-type: none; }
+img { max-width: 100%; margin: 8px 0; border-radius: 6px; }
+span.image-caption {
   display: block;
+  width: 100%;
+  font-family: PingFangSC-Regular, sans-serif;
+  font-size: 12px;
+  color: rgb(167, 167, 167);
+  letter-spacing: 0px;
+  text-align: center;
+  margin-top: 4px;
+  margin-bottom: 12px;
 }
-
-ol > li {
-  display: block;
-}
-
-ol > li:before {
-  content: counters(item, ".") ". ";
-}
-
-ol ol > li:before {
-  content: counters(item, ".") ". ";
-  margin-left: -20px;
-}
-
-ul.indent {
-  list-style-type: none;
-}
-
-img{max-width:100%}
 </style>
 </head>
 <body>
 ${body}
 </body>
 </html>`;
+  }
+
+  function markdownToEtherpadHTML(markdown = '', options = {}) {
+    const body = buildEtherpadBodyHTML(markdown);
+    return wrapInEtherpadDocument(body);
   }
 
   function renderRunsToMarkdown(runs = [], fallbackText = '') {
@@ -540,7 +521,8 @@ ${body}
 
   const FEISHU_UI_NOISE_TEXT = /^(?:添加图标|添加封面|点击添加图标|点击添加封面|更换图标|更换封面|移除封面|移除图标|添加表情|添加背景|添加描述|添加标签|新建页面|关联页面|评论|#|\/\/)$/i;
 
-  function blocksToMarkdown(blocks = []) {
+  function blocksToMarkdown(blocks = [], options = {}) {
+    const { forWechat = false } = options;
     const lines = [];
     let lastImageKey = '';
 
@@ -565,7 +547,10 @@ ${body}
 
       // Image
       if (type === 'image' || block.image) {
-        const src = block.image?.dataUri || block.image?.currentSrc || block.image?.src || '';
+        const httpSrc = block.image?.originSrc || block.image?.currentSrc || block.image?.src || '';
+        const dataUri = block.image?.dataUri || '';
+        // 关键：Pad 与标准 Markdown 必须使用 HTTP/HTTPS 原图地址；微信排版可使用 Base64 Data URI
+        const src = (forWechat && dataUri) ? dataUri : (httpSrc || dataUri);
         const token = block.image?.token || '';
         const alt = block.image?.alt || '';
         const imageKey = token || (src ? src.split('?')[0] : '');
@@ -660,15 +645,20 @@ ${body}
    */
   function convertFeishuDoc(input = '', options = {}) {
     let markdown = '';
+    let wechatMarkdown = '';
+
     if (Array.isArray(input)) {
-      markdown = blocksToMarkdown(input);
+      markdown = blocksToMarkdown(input, { forWechat: false });
+      wechatMarkdown = blocksToMarkdown(input, { forWechat: true });
     } else if (typeof input === 'string') {
       const isHtml = /<[a-z][\s\S]*>/i.test(input);
       markdown = isHtml ? convertHtmlToMarkdown(input) : input;
+      wechatMarkdown = markdown;
     }
 
-    const wechatHtml = markdownToWeChatHTML(markdown, options);
-    const etherpadHtml = markdownToEtherpadHTML(markdown, options);
+    const wechatHtml = markdownToWeChatHTML(wechatMarkdown, options);
+    const etherpadBody = buildEtherpadBodyHTML(markdown);
+    const etherpadHtml = wrapInEtherpadDocument(etherpadBody);
 
     // 统计图片数量
     const imgMatches = markdown.match(/!\[[^\]]*\]\([^)]+\)|<img[^>]+>/gi) || [];
@@ -679,7 +669,10 @@ ${body}
 
     return {
       markdown,
+      cleanMarkdown: markdown,
+      wechatMarkdown,
       wechatHtml,
+      etherpadBody,
       etherpadHtml,
       imageCount,
       blockCount
@@ -701,6 +694,8 @@ ${body}
     convertHtmlToMarkdown,
     markdownToWeChatHTML,
     markdownToEtherpadHTML,
+    buildEtherpadBodyHTML,
+    wrapInEtherpadDocument,
     convertFeishuDoc
   });
 })(globalThis);
