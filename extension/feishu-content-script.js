@@ -696,31 +696,23 @@ function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', orig
   const candidates = [];
   const driveHost = 'internal-api-drive-stream.feishu.cn';
 
-  // 1. 如果有官方全尺寸挂载数据流 data-src，置为最高优先级
-  if (dataSrc && !dataSrc.startsWith('data:')) {
-    candidates.push(dataSrc);
-  }
-
-  // 2. 如果有 token 和 recordId，构造带挂载节点的官方无损全尺寸数据流
+  // 1. 无损全分辨率官方预览通道 preview_type=1 (最高优先级)
   if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
     if (recordId) {
-      candidates.push(`https://${driveHost}/space/api/box/stream/download/all/${token}/?mount_node_token=${recordId}&mount_point=docx_image`);
       candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?mount_node_token=${recordId}&mount_point=docx_image&preview_type=1`);
       candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?mount_node_token=${recordId}&mount_point=docx_image&preview_type=15`);
     }
-    // 标准无损全尺寸 preview_type=1 与 4K preview_type=15
     candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?preview_type=1`);
     candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/?preview_type=15`);
     candidates.push(`https://${driveHost}/space/api/box/stream/download/preview/${token}/`);
-    candidates.push(`https://${driveHost}/space/api/box/stream/download/all/${token}/`);
   }
 
-  // 3. 针对 baseSrc 进行 preview_type=1 替换
-  const baseSrc = originSrc || src;
+  // 2. 从 baseSrc 中提取并构造 preview_type=1 / 15
+  const baseSrc = originSrc || src || dataSrc;
   if (baseSrc && !baseSrc.startsWith('data:')) {
     try {
       const u1 = new URL(baseSrc, location.href);
-      if (u1.hostname.includes('feishu.cn') || u1.hostname.includes('feishucdn.com')) {
+      if (u1.hostname.includes('feishu.cn') || u1.hostname.includes('feishucdn.com') || u1.hostname.includes('drive-stream')) {
         u1.searchParams.set('preview_type', '1');
         u1.searchParams.delete('width');
         u1.searchParams.delete('height');
@@ -747,6 +739,11 @@ function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', orig
     } catch {}
   }
 
+  // 3. 官方 data-src 属性
+  if (dataSrc && !dataSrc.startsWith('data:')) {
+    candidates.push(dataSrc);
+  }
+
   // 4. 显式原图属性
   if (originSrc && !originSrc.startsWith('data:') && originSrc !== src) {
     candidates.push(originSrc);
@@ -758,7 +755,7 @@ function getHighResFeishuImageCandidates(src = '', token = '', srcset = '', orig
     candidates.push(...entries.reverse());
   }
 
-  // 6. 兜底原始地址 (内联预览图)
+  // 6. 兜底原始地址
   if (src && !src.startsWith('data:')) candidates.push(src);
 
   return [...new Set(candidates.filter(Boolean))];
@@ -782,11 +779,17 @@ async function fetchImageAsDataUri(src, token = '', srcset = '', originSrc = '',
       });
 
       if (res.ok) {
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        if (contentType.includes('application/json') || contentType.includes('text/html')) {
+          continue;
+        }
         const blob = await res.blob();
-        if (blob && blob.size > 200) {
-          bestBlob = blob;
-          // 只要成功拿到全分辨率原图或大于 50KB 的清晰大图，立即采用
-          if (blob.size > 50 * 1024 || url.includes('preview_type=1') || url.includes('preview_type=15') || url.includes('/download/all/')) {
+        if (blob && blob.size > 500 && (blob.type.startsWith('image/') || contentType.startsWith('image/'))) {
+          if (!bestBlob || blob.size > bestBlob.size) {
+            bestBlob = blob;
+          }
+          // 只要成功拿到无损原图或大于 25KB 的清晰大图，立即采用
+          if (blob.size > 25 * 1024 || (url.includes('preview_type=1') && blob.size > 3000)) {
             break;
           }
         }
@@ -877,13 +880,15 @@ async function extractFeishuDocDirect() {
         block.image.dataUri = block.image.fallbackDataUri;
       }
 
-      // 构造全尺寸高清原图 URL 给 Pad
-      if (dataSrc) {
-        block.image.originSrc = dataSrc;
-      } else if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
+      // 构造全尺寸无损高清原图 URL 给 Pad 与 Markdown
+      if (token && (token.startsWith('boxcn') || token.startsWith('box'))) {
         block.image.originSrc = `https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/${token}/?preview_type=1`;
-      } else if (!block.image.originSrc) {
-        block.image.originSrc = src;
+      } else if (dataSrc && !dataSrc.includes('preview_type=16')) {
+        block.image.originSrc = dataSrc;
+      } else if (originSrc) {
+        block.image.originSrc = originSrc.replace(/preview_type=16/g, 'preview_type=1');
+      } else if (src) {
+        block.image.originSrc = src.replace(/preview_type=16/g, 'preview_type=1');
       }
     }));
   }

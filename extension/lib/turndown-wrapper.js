@@ -189,7 +189,7 @@ function loadHtmlAndGetImages(htmlStr) {
         }
 
         if (token && objToken) {
-            src = 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/all/' + token + '/?mount_node_token=' + objToken + '&mount_point=docx_image';
+            src = 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/' + token + '/?mount_node_token=' + objToken + '&mount_point=docx_image&preview_type=1';
         } else if (token) {
             src = 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/preview/' + token + '/?preview_type=1';
         } else if (src.includes('preview_type=16')) {

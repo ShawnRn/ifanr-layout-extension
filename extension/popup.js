@@ -284,6 +284,10 @@
         }
         const res = await fetch(fetchUrl, { credentials: 'include' });
         if (res.ok) {
+          const contentType = (res.headers.get('content-type') || '').toLowerCase();
+          if (contentType.includes('application/json') || contentType.includes('text/html')) {
+            return;
+          }
           const blob = await res.blob();
           if (blob && blob.size > 200) {
             const dataUri = await new Promise((resolve) => {
@@ -294,6 +298,9 @@
             });
             if (dataUri) {
               updatedHtml = updatedHtml.split(url).join(dataUri);
+              if (fetchUrl !== url) {
+                updatedHtml = updatedHtml.split(fetchUrl).join(dataUri);
+              }
             }
           }
         }
